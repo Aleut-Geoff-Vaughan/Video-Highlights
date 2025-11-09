@@ -106,6 +106,7 @@ python VideoHighlightsGUI.py
 ```
 
 The desktop GUI provides:
+- **Hardware information display** - shows detected CPU and GPU at startup
 - Browse and select your video file
 - Set trim start/end times with easy time format (MM:SS or HH:MM:SS)
 - Configure all detection parameters

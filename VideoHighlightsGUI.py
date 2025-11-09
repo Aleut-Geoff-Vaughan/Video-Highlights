@@ -12,6 +12,7 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 import threading
 from pathlib import Path
 from io import StringIO
+import platform
 
 def check_gpu_available():
     """Check if CUDA GPU is available"""
@@ -21,12 +22,68 @@ def check_gpu_available():
     except ImportError:
         return False
 
+def get_hardware_info():
+    """Get CPU and GPU hardware information"""
+    info = {}
+
+    # Get CPU info
+    try:
+        import psutil
+        cpu_count = psutil.cpu_count(logical=False)  # Physical cores
+        cpu_count_logical = psutil.cpu_count(logical=True)  # Logical cores
+        info['cpu'] = f"{cpu_count} cores ({cpu_count_logical} threads)"
+    except ImportError:
+        # Fallback if psutil not available
+        import multiprocessing
+        cpu_count = multiprocessing.cpu_count()
+        info['cpu'] = f"{cpu_count} cores"
+
+    # Get CPU model name
+    try:
+        if platform.system() == "Linux":
+            with open('/proc/cpuinfo', 'r') as f:
+                for line in f:
+                    if 'model name' in line:
+                        info['cpu_model'] = line.split(':')[1].strip()
+                        break
+        elif platform.system() == "Darwin":  # macOS
+            import subprocess
+            result = subprocess.run(['sysctl', '-n', 'machdep.cpu.brand_string'],
+                                  capture_output=True, text=True)
+            info['cpu_model'] = result.stdout.strip()
+        elif platform.system() == "Windows":
+            import subprocess
+            result = subprocess.run(['wmic', 'cpu', 'get', 'name'],
+                                  capture_output=True, text=True)
+            lines = result.stdout.strip().split('\n')
+            if len(lines) > 1:
+                info['cpu_model'] = lines[1].strip()
+    except:
+        pass
+
+    # Get GPU info
+    try:
+        import torch
+        if torch.cuda.is_available():
+            gpu_name = torch.cuda.get_device_name(0)
+            gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)  # GB
+            info['gpu'] = f"{gpu_name} ({gpu_memory:.1f} GB)"
+            info['gpu_available'] = True
+        else:
+            info['gpu'] = "No CUDA GPU detected"
+            info['gpu_available'] = False
+    except ImportError:
+        info['gpu'] = "PyTorch not installed"
+        info['gpu_available'] = False
+
+    return info
+
 
 class VideoHighlightsGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Video Highlights Generator")
-        self.root.geometry("800x700")
+        self.root.geometry("850x750")
         self.root.resizable(True, True)
 
         # Variables
@@ -59,8 +116,46 @@ class VideoHighlightsGUI:
         # Title
         title = ttk.Label(main_frame, text="Soccer Highlight Generator",
                          font=('Helvetica', 16, 'bold'))
-        title.grid(row=row, column=0, columnspan=3, pady=(0, 20))
+        title.grid(row=row, column=0, columnspan=3, pady=(0, 10))
         row += 1
+
+        # Hardware info section
+        hw_info = get_hardware_info()
+
+        # Create a frame for hardware info with border
+        hw_frame = ttk.LabelFrame(main_frame, text="Hardware Information", padding="10")
+        hw_frame.grid(row=row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 15))
+        row += 1
+
+        # CPU info
+        cpu_label = ttk.Label(hw_frame, text="CPU:", font=('Helvetica', 9, 'bold'))
+        cpu_label.grid(row=0, column=0, sticky=tk.W, padx=(0, 10))
+
+        cpu_text = hw_info.get('cpu_model', 'Unknown')
+        if 'cpu' in hw_info:
+            cpu_text += f" - {hw_info['cpu']}"
+        cpu_value = ttk.Label(hw_frame, text=cpu_text, font=('Helvetica', 9))
+        cpu_value.grid(row=0, column=1, sticky=tk.W)
+
+        # GPU info
+        gpu_label = ttk.Label(hw_frame, text="GPU:", font=('Helvetica', 9, 'bold'))
+        gpu_label.grid(row=1, column=0, sticky=tk.W, padx=(0, 10), pady=(5, 0))
+
+        gpu_text = hw_info.get('gpu', 'Unknown')
+        gpu_available = hw_info.get('gpu_available', False)
+
+        # Add status indicator
+        if gpu_available:
+            gpu_status = "✓ " + gpu_text
+            gpu_color = '#2d862d'  # Green
+        else:
+            gpu_status = "⚠ " + gpu_text
+            gpu_color = '#d97706'  # Orange
+
+        # Use tk.Label instead of ttk.Label for color support
+        gpu_value = tk.Label(hw_frame, text=gpu_status, font=('Helvetica', 9),
+                            foreground=gpu_color, background=hw_frame.cget('background'))
+        gpu_value.grid(row=1, column=1, sticky=tk.W, pady=(5, 0))
 
         # Video file selection
         ttk.Label(main_frame, text="Video File:").grid(row=row, column=0, sticky=tk.W, pady=5)

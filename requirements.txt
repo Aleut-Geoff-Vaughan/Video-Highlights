@@ -20,6 +20,9 @@ soundfile>=0.10.0
 # Web Interface
 streamlit>=1.28.0
 
+# System Information (for GUI hardware display)
+psutil>=5.8.0
+
 # Optional: For better performance
 # torch>=2.0.0  # Uncomment if you want to use GPU acceleration with YOLO
 # torchvision>=0.15.0
