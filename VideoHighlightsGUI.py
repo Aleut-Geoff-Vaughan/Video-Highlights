@@ -94,6 +94,8 @@ class VideoHighlightsGUI:
         self.pre_seconds = tk.StringVar(value="2.0")
         self.post_seconds = tk.StringVar(value="6.0")
         self.min_clip = tk.StringVar(value="4.0")
+        self.speed_sensitivity = tk.StringVar(value="2.0")
+        self.audio_sensitivity = tk.StringVar(value="2.0")
         self.select_player = tk.BooleanVar(value=False)
         self.overlay = tk.BooleanVar(value=False)
         self.no_audio = tk.BooleanVar(value=False)
@@ -220,6 +222,18 @@ class VideoHighlightsGUI:
         # Minimum clip duration
         ttk.Label(main_frame, text="Minimum clip duration (seconds):").grid(row=row, column=0, sticky=tk.W, pady=5)
         ttk.Entry(main_frame, textvariable=self.min_clip, width=10).grid(row=row, column=1, sticky=tk.W, pady=5)
+        row += 1
+
+        # Speed sensitivity
+        ttk.Label(main_frame, text="Speed sensitivity:").grid(row=row, column=0, sticky=tk.W, pady=5)
+        ttk.Entry(main_frame, textvariable=self.speed_sensitivity, width=10).grid(row=row, column=1, sticky=tk.W, pady=5)
+        ttk.Label(main_frame, text="(lower = more sensitive, default: 2.0)", foreground="gray").grid(row=row, column=2, sticky=tk.W, padx=(5, 0))
+        row += 1
+
+        # Audio sensitivity
+        ttk.Label(main_frame, text="Audio sensitivity:").grid(row=row, column=0, sticky=tk.W, pady=5)
+        ttk.Entry(main_frame, textvariable=self.audio_sensitivity, width=10).grid(row=row, column=1, sticky=tk.W, pady=5)
+        ttk.Label(main_frame, text="(lower = more sensitive, default: 2.0)", foreground="gray").grid(row=row, column=2, sticky=tk.W, padx=(5, 0))
         row += 1
 
         # Separator
@@ -408,7 +422,9 @@ class VideoHighlightsGUI:
             'trim_start': trim_start,
             'trim_end': trim_end,
             'threads': None,  # Auto-detect
-            'require_gpu': self.require_gpu.get()
+            'require_gpu': self.require_gpu.get(),
+            'speed_sensitivity': float(self.speed_sensitivity.get()),
+            'audio_sensitivity': float(self.audio_sensitivity.get())
         }
 
     def run_processing(self):

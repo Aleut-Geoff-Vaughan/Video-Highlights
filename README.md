@@ -6,9 +6,12 @@ A no-subscription, local Python pipeline for generating soccer highlight reels f
 
 - **Player Tracking**: Uses YOLO + ByteTrack to track all players
 - **Smart Player Selection**: Lock onto your player with interactive box selection or auto-detect longest-playing player
-- **Intelligent Highlight Detection**: Finds exciting moments using:
-  - Speed/acceleration spikes from player movement
-  - Audio peaks (crowd reactions, whistles, etc.)
+- **Intelligent Highlight Detection**: Finds exciting moments using multi-factor analysis:
+  - **Speed/acceleration spikes** from player movement
+  - **Ball proximity tracking** - detects when player is near the ball
+  - **Direction changes** - identifies cuts, turns, and sudden movements
+  - **Audio peaks** (crowd reactions, whistles, etc.)
+  - **Configurable sensitivity** - tune detection thresholds to your needs
 - **Video Trimming**: Process only specific portions of long game videos
 - **Clean Output**: Exports highlight clips and optional spotlight overlay versions
 - **GUI & Command Line**: Choose between a user-friendly GUI or powerful command-line interface
@@ -154,17 +157,26 @@ python VideoHighlights.py
 - `--pre` - Seconds before event (default: 2.0)
 - `--post` - Seconds after event (default: 6.0)
 - `--min-clip` - Minimum clip duration in seconds (default: 4.0)
+- `--speed-sensitivity` - Speed detection sensitivity, lower = more sensitive (default: 2.0, range: 0.5-5.0)
+- `--audio-sensitivity` - Audio detection sensitivity, lower = more sensitive (default: 2.0, range: 0.5-5.0)
 - `--overlay` - Render spotlight overlay clips (slower)
 - `--no-audio` - Disable audio-based peak detection
 
 ## How It Works
 
 1. **Video Trimming** (Optional): Creates a working copy of the specified time range
-2. **Player Tracking**: YOLO detects all people, ByteTrack maintains consistent IDs across frames
+2. **Player & Ball Tracking**: YOLO detects all people and the ball, ByteTrack maintains consistent IDs across frames
 3. **Target Selection**: Either you select the player manually, or it picks the longest-lived track
-4. **Highlight Detection**:
-   - Analyzes player speed/acceleration for action moments
-   - Detects audio peaks for crowd reactions
+4. **Multi-Factor Highlight Detection**:
+   - **Speed Analysis**: Detects rapid player movement and acceleration
+   - **Ball Proximity**: Identifies when player is near the ball (within 200px for elevated views)
+   - **Direction Changes**: Catches sudden cuts, turns, and direction reversals
+   - **Audio Peaks**: Detects crowd reactions, whistles, and celebrations
+   - **Smart Scoring**: Combines all factors with configurable weights:
+     - Speed: 50% weight
+     - Ball proximity: 30% weight
+     - Direction changes: 20% weight
+   - Uses robust MAD (Median Absolute Deviation) threshold to adapt to each video
    - Merges nearby events into coherent clips
 5. **Clip Generation**: Extracts highlight clips from the original video with proper timestamps
 6. **Montage Creation**: Combines all highlights into a single compilation video
@@ -182,15 +194,23 @@ The script generates:
 - **Player Selection**: Use `--select` if your player isn't on the field the whole game
 - **Long Videos**: Use `--trim-start` and `--trim-end` to process only relevant portions (saves time!)
 - **Video Quality**: Works best with 1080p/60fps or 4K/60fps from a stable, elevated sideline view
+- **Ball Detection**: Works best with clear ball visibility - elevated sideline views are ideal for kids' soccer
+- **Tuning Sensitivity**:
+  - Start with default `--speed-sensitivity 2.0`
+  - If you get too many false positives, increase to `2.5` or `3.0`
+  - If you're missing highlights, decrease to `1.5` or `1.0`
+  - Same applies for `--audio-sensitivity`
 - **First Run**: YOLO weights (~6MB) will auto-download on first use
 - **Processing Time**: Expect ~1-2 minutes per minute of video for tracking (varies by hardware)
 
 ## Troubleshooting
 
-### No highlights found
-- Try lowering detection thresholds by editing `robust_threshold()` k value in the code
+### No highlights found or too few highlights
+- **Lower sensitivity thresholds**: Use `--speed-sensitivity 1.5` and `--audio-sensitivity 1.5` for more sensitive detection (default is 2.0, old default was 3.0)
+- **Try even lower values**: For very conservative videos, try `--speed-sensitivity 1.0` to catch more moments
+- **Check debug output**: The script now shows detailed detection statistics - look for lines starting with `[debug]` to see threshold values and number of candidates found
 - Use `--select` to ensure the correct player is tracked
-- Check that video has visible player movement
+- Check that video has visible player movement and the ball is detectable
 
 ### Video file not found
 - Use absolute paths or ensure relative paths are correct

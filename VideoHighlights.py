@@ -216,9 +216,9 @@ def merge_intervals(intervals: List[Tuple[float, float]], min_gap: float = 0.75)
     return merged
 
 
-def track_video(video_path: str, fps_hint: Optional[float] = None, select_roi: bool = False) -> Tuple[Dict[int, List[TrackPoint]], float, Tuple[int,int]]:
-    """Run YOLO + ByteTrack, return per-ID trajectory, FPS, and frame size.
-    Returns: (tracks, fps, (W,H)) where tracks[id] = [TrackPoint, ...]
+def track_video(video_path: str, fps_hint: Optional[float] = None, select_roi: bool = False) -> Tuple[Dict[int, List[TrackPoint]], List[TrackPoint], float, Tuple[int,int]]:
+    """Run YOLO + ByteTrack, return per-ID trajectory, ball trajectory, FPS, and frame size.
+    Returns: (tracks, ball_trajectory, fps, (W,H)) where tracks[id] = [TrackPoint, ...], ball_trajectory = [TrackPoint, ...]
     """
     # Prepare first frame (for selection)
     cap = cv2.VideoCapture(video_path)
@@ -252,9 +252,10 @@ def track_video(video_path: str, fps_hint: Optional[float] = None, select_roi: b
 
     # The stream=True iterator yields per-frame results with .boxes and .boxes.id
     tracks: Dict[int, List[TrackPoint]] = {}
+    ball_trajectory: List[TrackPoint] = []
 
     for frame_idx, result in enumerate(model.track(source=video_path, stream=True, tracker="bytetrack.yaml", classes=[0, 32], device=device, half=True if device == 'cuda' else False, verbose=False)):
-        # We mostly care about persons (class 0). result.boxes.cls, .id, .xyxy
+        # We care about persons (class 0) and sports ball (class 32). result.boxes.cls, .id, .xyxy
         if result.boxes is None or result.boxes.id is None:
             continue
         ids = result.boxes.id.cpu().numpy().astype(int)
@@ -263,11 +264,13 @@ def track_video(video_path: str, fps_hint: Optional[float] = None, select_roi: b
 
         t = frame_idx / fps
         for idx, (track_id, c) in enumerate(zip(ids, cls)):
-            if c != 0:  # person only
-                continue
             x1, y1, x2, y2 = xyxy[idx]
             cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
-            tracks.setdefault(track_id, []).append(TrackPoint(t=t, xy=(float(cx), float(cy))))
+
+            if c == 0:  # person
+                tracks.setdefault(track_id, []).append(TrackPoint(t=t, xy=(float(cx), float(cy))))
+            elif c == 32:  # sports ball
+                ball_trajectory.append(TrackPoint(t=t, xy=(float(cx), float(cy))))
 
     # Choose target ID
     target_id = None
@@ -309,7 +312,8 @@ def track_video(video_path: str, fps_hint: Optional[float] = None, select_roi: b
     if target_id is None:
         raise RuntimeError("No player track found. Try using --select on the first frame.")
 
-    return {target_id: tracks[target_id]}, fps, (W, H)
+    print(f"[info] Tracked {len(ball_trajectory)} ball detections across video")
+    return {target_id: tracks[target_id]}, ball_trajectory, fps, (W, H)
 
 
 def compute_speed_series(traj: List[TrackPoint], fps: float) -> Tuple[np.ndarray, np.ndarray]:
@@ -327,19 +331,132 @@ def compute_speed_series(traj: List[TrackPoint], fps: float) -> Tuple[np.ndarray
     return times[1:], speed
 
 
-def detect_highlights_from_speed(times: np.ndarray, speed: np.ndarray, pre: float, post: float) -> List[Tuple[float, float]]:
+def compute_direction_changes(traj: List[TrackPoint], fps: float) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute direction change magnitude for trajectory.
+    Detects sudden changes in movement direction (cuts, turns, stops).
+
+    Returns:
+        times: Array of timestamps
+        direction_changes: Array of direction change magnitudes (radians)
+    """
+    if len(traj) < 3:
+        return np.array([]), np.array([])
+
+    times = np.array([p.t for p in traj])
+    centers = np.array([p.xy for p in traj])
+
+    # Compute velocity vectors
+    velocity = np.diff(centers, axis=0)  # [dx, dy] between consecutive points
+
+    if len(velocity) < 2:
+        return np.array([]), np.array([])
+
+    # Compute angle between consecutive velocity vectors
+    direction_changes = []
+    for i in range(len(velocity) - 1):
+        v1 = velocity[i]
+        v2 = velocity[i + 1]
+
+        # Handle zero velocity (stopped)
+        v1_mag = np.linalg.norm(v1)
+        v2_mag = np.linalg.norm(v2)
+
+        if v1_mag < 1e-6 or v2_mag < 1e-6:
+            direction_changes.append(0.0)
+            continue
+
+        # Compute angle between vectors using dot product
+        cos_angle = np.dot(v1, v2) / (v1_mag * v2_mag)
+        cos_angle = np.clip(cos_angle, -1.0, 1.0)  # Numerical stability
+        angle_rad = np.arccos(cos_angle)
+
+        direction_changes.append(angle_rad)
+
+    direction_changes = np.array(direction_changes)
+
+    # Align with times (skip first two timestamps due to diff operations)
+    aligned_times = times[2:]
+
+    print(f"[debug] Direction changes: {len(direction_changes)} values, max={np.rad2deg(direction_changes.max()):.1f}°, mean={np.rad2deg(direction_changes.mean()):.1f}°")
+
+    return aligned_times, direction_changes
+
+
+def compute_ball_proximity_score(player_traj: List[TrackPoint], ball_traj: List[TrackPoint], proximity_threshold: float = 200.0) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute ball proximity score for each player trajectory point.
+    Returns (times, proximity_scores) where score is 1/distance (higher = closer to ball)
+
+    Args:
+        player_traj: Player trajectory points
+        ball_traj: Ball trajectory points
+        proximity_threshold: Distance in pixels considered "close" (default: 200px for kids soccer from elevation)
+
+    Returns:
+        times: Array of timestamps
+        proximity_scores: Array of proximity scores (higher = player closer to ball)
+    """
+    if len(player_traj) == 0 or len(ball_traj) == 0:
+        print("[debug] No ball or player trajectory for proximity scoring")
+        return np.array([]), np.array([])
+
+    player_times = np.array([p.t for p in player_traj])
+    player_centers = np.array([p.xy for p in player_traj])
+
+    ball_times = np.array([b.t for b in ball_traj])
+    ball_centers = np.array([b.xy for b in ball_traj])
+
+    # For each player time point, find nearest ball detection in time
+    proximity_scores = []
+    for i, pt in enumerate(player_times):
+        # Find ball detections within +/- 0.5 seconds
+        time_window = 0.5
+        nearby_ball_indices = np.where(np.abs(ball_times - pt) <= time_window)[0]
+
+        if len(nearby_ball_indices) == 0:
+            proximity_scores.append(0.0)  # No ball detected nearby in time
+            continue
+
+        # Calculate distance to nearest ball
+        player_pos = player_centers[i]
+        min_distance = float('inf')
+        for ball_idx in nearby_ball_indices:
+            ball_pos = ball_centers[ball_idx]
+            distance = np.linalg.norm(player_pos - ball_pos)
+            min_distance = min(min_distance, distance)
+
+        # Convert distance to proximity score (inverse relationship)
+        # Use sigmoid-like function: score is high when distance < threshold
+        if min_distance < proximity_threshold:
+            score = (proximity_threshold - min_distance) / proximity_threshold
+        else:
+            score = 0.0
+
+        proximity_scores.append(score)
+
+    proximity_scores = np.array(proximity_scores)
+    print(f"[debug] Ball proximity: {len(proximity_scores)} scores, max={proximity_scores.max():.3f}, mean={proximity_scores.mean():.3f}")
+
+    return player_times, proximity_scores
+
+
+def detect_highlights_from_speed(times: np.ndarray, speed: np.ndarray, pre: float, post: float, k: float = 2.0) -> List[Tuple[float, float]]:
     if len(speed) == 0:
         return []
-    thr = robust_threshold(speed, k=3.0)
+    thr = robust_threshold(speed, k=k)
     candidates = np.where(speed >= thr)[0]
+    print(f"[debug] Speed threshold: {thr:.2f} (k={k}), found {len(candidates)} speed peaks")
+    if len(candidates) > 0:
+        print(f"[debug] Speed range: min={speed.min():.2f}, max={speed.max():.2f}, median={np.median(speed):.2f}")
     intervals = []
     for idx in candidates:
         t = float(times[idx])
         intervals.append((max(0.0, t - pre), t + post))
-    return merge_intervals(intervals)
+    merged = merge_intervals(intervals)
+    print(f"[debug] Speed intervals before merge: {len(intervals)}, after merge: {len(merged)}")
+    return merged
 
 
-def detect_audio_peaks(video_path: str, pre: float, post: float) -> List[Tuple[float, float]]:
+def detect_audio_peaks(video_path: str, pre: float, post: float, k: float = 2.0) -> List[Tuple[float, float]]:
     try:
         # Load audio at native sampling rate
         y, sr = librosa.load(video_path, sr=None, mono=True)
@@ -349,13 +466,108 @@ def detect_audio_peaks(video_path: str, pre: float, post: float) -> List[Tuple[f
         rms = librosa.feature.rms(y=y, frame_length=win, hop_length=hop, center=True).flatten()
         # Map frames to times
         times = librosa.frames_to_time(np.arange(len(rms)), sr=sr, hop_length=hop, n_fft=win)
-        thr = robust_threshold(rms, k=3.0)
+        thr = robust_threshold(rms, k=k)
         peaks = np.where(rms >= thr)[0]
+        print(f"[debug] Audio threshold: {thr:.4f} (k={k}), found {len(peaks)} audio peaks")
+        if len(peaks) > 0:
+            print(f"[debug] Audio RMS range: min={rms.min():.4f}, max={rms.max():.4f}, median={np.median(rms):.4f}")
         intervals = [(max(0.0, float(times[i]) - pre), float(times[i]) + post) for i in peaks]
-        return merge_intervals(intervals)
+        merged = merge_intervals(intervals)
+        print(f"[debug] Audio intervals before merge: {len(intervals)}, after merge: {len(merged)}")
+        return merged
     except Exception as e:
         print(f"[warn] audio peak detection failed: {e}")
         return []
+
+
+def detect_highlights_multi_factor(
+    times: np.ndarray,
+    speed: np.ndarray,
+    ball_proximity: np.ndarray,
+    direction_changes: np.ndarray,
+    pre: float,
+    post: float,
+    speed_weight: float = 0.5,
+    proximity_weight: float = 0.3,
+    direction_weight: float = 0.2,
+    k: float = 2.0
+) -> List[Tuple[float, float]]:
+    """Detect highlights using multi-factor scoring: speed + ball proximity + direction changes.
+
+    Args:
+        times: Timestamp array
+        speed: Speed values (pixels/sec)
+        ball_proximity: Ball proximity scores (0-1)
+        direction_changes: Direction change magnitudes (radians)
+        pre: Seconds before event
+        post: Seconds after event
+        speed_weight: Weight for speed factor (default: 0.5)
+        proximity_weight: Weight for proximity factor (default: 0.3)
+        direction_weight: Weight for direction change factor (default: 0.2)
+        k: Threshold multiplier for MAD (default: 2.0)
+
+    Returns:
+        List of (start, end) intervals
+    """
+    if len(speed) == 0:
+        print("[debug] No speed data for multi-factor detection")
+        return []
+
+    # Normalize speed to 0-1 range
+    speed_norm = (speed - speed.min()) / (speed.max() - speed.min() + 1e-9)
+
+    # Ensure ball_proximity aligns with speed times
+    if len(ball_proximity) == 0:
+        print("[debug] No ball proximity data, using zero weight")
+        proximity_norm = np.zeros_like(speed_norm)
+    else:
+        # ball_proximity should already be 0-1 range
+        proximity_norm = ball_proximity
+        # If lengths don't match, interpolate or pad
+        if len(proximity_norm) != len(speed_norm):
+            print(f"[debug] Length mismatch: speed={len(speed_norm)}, proximity={len(proximity_norm)}")
+            # Truncate or pad to match
+            if len(proximity_norm) > len(speed_norm):
+                proximity_norm = proximity_norm[:len(speed_norm)]
+            else:
+                proximity_norm = np.pad(proximity_norm, (0, len(speed_norm) - len(proximity_norm)), 'constant')
+
+    # Ensure direction_changes aligns with speed times
+    if len(direction_changes) == 0:
+        print("[debug] No direction change data, using zero weight")
+        direction_norm = np.zeros_like(speed_norm)
+    else:
+        # Normalize direction changes (0 = no change, pi = complete reversal)
+        direction_norm = direction_changes / (np.pi + 1e-9)  # Normalize to 0-1
+        # If lengths don't match, pad or truncate
+        if len(direction_norm) != len(speed_norm):
+            print(f"[debug] Length mismatch: speed={len(speed_norm)}, direction={len(direction_norm)}")
+            if len(direction_norm) > len(speed_norm):
+                direction_norm = direction_norm[:len(speed_norm)]
+            else:
+                direction_norm = np.pad(direction_norm, (0, len(speed_norm) - len(direction_norm)), 'constant')
+
+    # Compute combined score
+    combined_score = (speed_weight * speed_norm) + (proximity_weight * proximity_norm) + (direction_weight * direction_norm)
+
+    print(f"[debug] Multi-factor score: min={combined_score.min():.3f}, max={combined_score.max():.3f}, mean={combined_score.mean():.3f}")
+    print(f"[debug] Weights: speed={speed_weight}, proximity={proximity_weight}, direction={direction_weight}")
+
+    # Apply robust threshold to combined score
+    thr = robust_threshold(combined_score, k=k)
+    candidates = np.where(combined_score >= thr)[0]
+
+    print(f"[debug] Multi-factor threshold: {thr:.3f} (k={k}), found {len(candidates)} highlights")
+
+    intervals = []
+    for idx in candidates:
+        t = float(times[idx])
+        intervals.append((max(0.0, t - pre), t + post))
+
+    merged = merge_intervals(intervals)
+    print(f"[debug] Multi-factor intervals before merge: {len(intervals)}, after merge: {len(merged)}")
+
+    return merged
 
 
 def check_nvenc_available() -> bool:
@@ -592,7 +804,9 @@ def process_video_highlights(
     trim_start: Optional[float] = None,
     trim_end: Optional[float] = None,
     threads: Optional[int] = None,
-    require_gpu: bool = False
+    require_gpu: bool = False,
+    speed_sensitivity: float = 2.0,
+    audio_sensitivity: float = 2.0
 ) -> bool:
     """
     Core video highlights processing function.
@@ -657,22 +871,37 @@ def process_video_highlights(
         original_video = video_path
         processing_video, trim_offset = create_trimmed_video(video_path, output_dir, trim_start, trim_end)
 
-        print("[1/5] Tracking players (YOLO + ByteTrack)...")
-        tracks, fps, (W, H) = track_video(processing_video, select_roi=select_player)
+        print("[1/5] Tracking players and ball (YOLO + ByteTrack)...")
+        tracks, ball_traj, fps, (W, H) = track_video(processing_video, select_roi=select_player)
         target_id = list(tracks.keys())[0]
         traj = tracks[target_id]
 
-        print("[2/5] Computing speed-based highlights...")
+        print("[2/5] Computing multi-factor highlights (speed + ball proximity + direction changes)...")
         times, speed = compute_speed_series(traj, fps)
-        speed_intervals = detect_highlights_from_speed(times, speed, pre=pre_seconds, post=post_seconds)
+
+        # Compute ball proximity scores
+        prox_times, ball_proximity = compute_ball_proximity_score(traj, ball_traj, proximity_threshold=200.0)
+
+        # Compute direction changes
+        dir_times, direction_changes = compute_direction_changes(traj, fps)
+
+        # Use multi-factor detection that combines speed, ball proximity, and direction changes
+        speed_intervals = detect_highlights_multi_factor(
+            times, speed, ball_proximity, direction_changes,
+            pre=pre_seconds, post=post_seconds,
+            speed_weight=0.5, proximity_weight=0.3, direction_weight=0.2,
+            k=speed_sensitivity
+        )
 
         audio_intervals = []
         if not no_audio:
             print("[3/5] Detecting audio peaks...")
-            audio_intervals = detect_audio_peaks(processing_video, pre=pre_seconds, post=post_seconds)
+            audio_intervals = detect_audio_peaks(processing_video, pre=pre_seconds, post=post_seconds, k=audio_sensitivity)
 
         print("[4/5] Merging and pruning intervals...")
+        print(f"[debug] Total intervals before merge: multi-factor={len(speed_intervals)}, audio={len(audio_intervals)}")
         intervals = merge_intervals(speed_intervals + audio_intervals)
+        print(f"[debug] Total intervals after final merge: {len(intervals)}")
 
         # Get video duration to clamp intervals
         cap_check = cv2.VideoCapture(processing_video)
@@ -681,14 +910,19 @@ def process_video_highlights(
 
         # Enforce minimum clip length and clamp to video duration
         clamped_intervals = []
-        for s, e in intervals:
-            if (e - s) < min_clip_duration:
+        for i, (s, e) in enumerate(intervals):
+            duration = e - s
+            if duration < min_clip_duration:
                 e = min(s + min_clip_duration, video_duration)
+                print(f"[debug] Interval {i+1}: extended from {duration:.2f}s to {e-s:.2f}s (min={min_clip_duration}s)")
             else:
                 e = min(e, video_duration)
             if e > s:
                 clamped_intervals.append((s, e))
+                print(f"[debug] Interval {i+1}: [{s:.2f}s - {e:.2f}s] duration={e-s:.2f}s")
         intervals = clamped_intervals
+
+        print(f"[debug] Final intervals after clamping: {len(intervals)}")
 
         if not intervals:
             print("No highlight intervals found. Try lowering thresholds or ensure --select is used.")
@@ -696,6 +930,7 @@ def process_video_highlights(
 
         # Adjust intervals back to original video timestamps if trimmed
         original_intervals = [(s + trim_offset, e + trim_offset) for s, e in intervals]
+        print(f"[debug] Original video intervals (with trim offset +{trim_offset:.2f}s): {len(original_intervals)}")
 
         if trim_offset > 0:
             print(f"[info] Found {len(intervals)} highlights. Adjusting timestamps to original video (offset: +{format_time(trim_offset)})")
@@ -746,6 +981,8 @@ def main():
     ap.add_argument("--trim-start", type=str, help="Trim video start time (format: MM:SS or HH:MM:SS or seconds)")
     ap.add_argument("--trim-end", type=str, help="Trim video end time (format: MM:SS or HH:MM:SS or seconds)")
     ap.add_argument("--threads", type=int, default=None, help="Number of parallel threads for clip writing (default: auto, max 4)")
+    ap.add_argument("--speed-sensitivity", type=float, default=2.0, help="Speed detection sensitivity (lower = more sensitive, default: 2.0, old default was 3.0)")
+    ap.add_argument("--audio-sensitivity", type=float, default=2.0, help="Audio peak detection sensitivity (lower = more sensitive, default: 2.0, old default was 3.0)")
     args = ap.parse_args()
 
     # Interactive mode if video or output not provided
@@ -839,7 +1076,9 @@ def main():
         trim_start=trim_start_seconds,
         trim_end=trim_end_seconds,
         threads=args.threads,
-        require_gpu=False  # CLI doesn't require GPU by default
+        require_gpu=False,  # CLI doesn't require GPU by default
+        speed_sensitivity=args.speed_sensitivity,
+        audio_sensitivity=args.audio_sensitivity
     )
 
     if not success:
