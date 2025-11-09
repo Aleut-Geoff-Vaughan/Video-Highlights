@@ -41,6 +41,7 @@ class VideoHighlightsGUI:
         self.overlay = tk.BooleanVar(value=False)
         self.no_audio = tk.BooleanVar(value=False)
         self.require_gpu = tk.BooleanVar(value=False)
+        self.verbose = tk.BooleanVar(value=False)
         self.processing = False
 
         self.setup_ui()
@@ -144,6 +145,10 @@ class VideoHighlightsGUI:
 
         ttk.Checkbutton(main_frame, text="Require GPU acceleration (stop if not available)",
                        variable=self.require_gpu).grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=3)
+        row += 1
+
+        ttk.Checkbutton(main_frame, text="Verbose logging (show detailed progress)",
+                       variable=self.verbose).grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=3)
         row += 1
 
         # Separator
@@ -356,9 +361,14 @@ class VideoHighlightsGUI:
             self.run_button.configure(state='normal')
             return
 
-        # Redirect stdout to capture print statements
+        # Redirect stdout and optionally stderr to capture output
         old_stdout = sys.stdout
+        old_stderr = sys.stderr
         sys.stdout = StringIO()
+
+        # If verbose mode is enabled, also capture stderr (progress bars, debug info)
+        if self.verbose.get():
+            sys.stderr = StringIO()
 
         try:
             # Call the core processing function
@@ -366,14 +376,41 @@ class VideoHighlightsGUI:
 
             # Get captured output
             output = sys.stdout.getvalue()
+            stderr_output = sys.stderr.getvalue() if self.verbose.get() else ""
 
-            # Restore stdout
+            # Restore stdout and stderr
             sys.stdout = old_stdout
+            sys.stderr = old_stderr
 
-            # Display output in console
+            # Display stdout output in console
             for line in output.split('\n'):
                 if line:
                     self.log(line)
+
+            # If verbose mode, also display stderr (progress bars, etc.)
+            if self.verbose.get() and stderr_output:
+                self.log("\n--- Verbose Output ---")
+                # Parse progress bar updates - only show final states or periodic updates
+                lines = stderr_output.split('\n')
+                last_progress_line = {}
+                for line in lines:
+                    if line.strip():
+                        # Detect progress bar lines (contain %, it/s, etc.)
+                        if '%' in line and ('it/s' in line or 'frame' in line or 'chunk' in line):
+                            # Extract the key (e.g., "frame_index", "chunk")
+                            key = line.split(':')[0].strip() if ':' in line else 'progress'
+                            # Only keep the last update for each progress bar
+                            last_progress_line[key] = line
+                        else:
+                            # Non-progress lines, log immediately
+                            self.log(line)
+
+                # Log final progress states
+                for key, line in last_progress_line.items():
+                    # Clean up progress bar formatting for better readability
+                    clean_line = line.replace('\r', '').strip()
+                    if clean_line:
+                        self.log(clean_line)
 
             if success:
                 self.log("\n" + "=" * 80)
@@ -388,8 +425,9 @@ class VideoHighlightsGUI:
                 messagebox.showerror("Error", "Processing failed. Check the output for details.")
 
         except Exception as e:
-            # Restore stdout
+            # Restore stdout and stderr
             sys.stdout = old_stdout
+            sys.stderr = old_stderr
 
             self.log(f"\n✗ Error: {str(e)}")
             import traceback

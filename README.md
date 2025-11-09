@@ -113,6 +113,7 @@ The desktop GUI provides:
 - Enable/disable options (player selection, overlay, audio detection)
 - **GPU requirement checkbox** - ensure GPU is available before processing
 - **GPU status indicator** - shows detected GPU or CPU mode
+- **Verbose logging option** - show detailed progress including frame processing stats
 - See real-time processing output
 - Get notified when complete
 
