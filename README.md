@@ -20,11 +20,47 @@ A no-subscription, local Python pipeline for generating soccer highlight reels f
 - Python 3.8 or higher
 - FFmpeg (for video processing)
 
-### Install Dependencies
+### Quick Start with Auto-Install
+
+The easiest way to get started is to use the provided launcher scripts, which will automatically check for and install dependencies:
+
+**Windows:**
+```bash
+run_gui.bat
+```
+
+**Linux/Mac:**
+```bash
+chmod +x run_gui.sh
+./run_gui.sh
+```
+
+These launchers will:
+- Check if Python is installed
+- Detect missing dependencies and offer to install them
+- Optionally install GPU acceleration (PyTorch with CUDA)
+- Launch the GUI once everything is ready
+
+### Manual Install Dependencies
+
+If you prefer to install dependencies manually:
 
 ```bash
 pip install -r requirements.txt
 ```
+
+### Optional: GPU Acceleration (2-3x faster)
+
+For significantly faster processing with NVIDIA GPUs:
+
+```bash
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+```
+
+**Requirements:**
+- NVIDIA GPU with CUDA support
+- CUDA drivers installed (verify with `nvidia-smi`)
+- 4GB+ VRAM recommended
 
 ## Usage
 
@@ -54,13 +90,19 @@ The web interface offers:
 
 Launch the graphical interface (requires display):
 
+**Windows:**
 ```bash
-python VideoHighlightsGUI.py
+run_gui.bat
 ```
 
-Or on Unix/Linux:
+**Linux/Mac:**
 ```bash
 ./run_gui.sh
+```
+
+**Or manually:**
+```bash
+python VideoHighlightsGUI.py
 ```
 
 The desktop GUI provides:
@@ -69,6 +111,8 @@ The desktop GUI provides:
 - Configure all detection parameters
 - Choose output directory
 - Enable/disable options (player selection, overlay, audio detection)
+- **GPU requirement checkbox** - ensure GPU is available before processing
+- **GPU status indicator** - shows detected GPU or CPU mode
 - See real-time processing output
 - Get notified when complete
 

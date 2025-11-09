@@ -214,3 +214,5 @@ first_frame*.jpg
 *TEMP*.mp4
 yolov8*.pt
 test_output_2min/trimmed_working_video.mp4
+test_output_2min/highlights_montage.mp4
+test_output_2min/highlight_01.mp4

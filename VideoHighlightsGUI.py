@@ -269,7 +269,10 @@ class VideoHighlightsGUI:
     def get_processing_params(self):
         """Get parameters for the core processing function"""
         # Lazy import to avoid loading heavy dependencies at GUI startup
-        from VideoHighlights import parse_time
+        try:
+            from VideoHighlights import parse_time
+        except ImportError as e:
+            raise ValueError(f"Failed to import VideoHighlights: {e}\n\nPlease install dependencies:\npip install -r requirements.txt")
 
         # Parse trim times
         trim_start = None
