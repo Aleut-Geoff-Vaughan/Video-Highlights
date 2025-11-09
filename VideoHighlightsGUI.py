@@ -13,9 +13,6 @@ import threading
 from pathlib import Path
 from io import StringIO
 
-# Import the core processing function from VideoHighlights
-from VideoHighlights import process_video_highlights, parse_time
-
 def check_gpu_available():
     """Check if CUDA GPU is available"""
     try:
@@ -271,6 +268,9 @@ class VideoHighlightsGUI:
 
     def get_processing_params(self):
         """Get parameters for the core processing function"""
+        # Lazy import to avoid loading heavy dependencies at GUI startup
+        from VideoHighlights import parse_time
+
         # Parse trim times
         trim_start = None
         trim_end = None
@@ -337,6 +337,22 @@ class VideoHighlightsGUI:
 
     def execute_processing(self, params):
         """Execute the core processing function and capture output"""
+        # Lazy import to avoid loading heavy dependencies at GUI startup
+        try:
+            from VideoHighlights import process_video_highlights
+        except ImportError as e:
+            self.log(f"\n✗ Error importing VideoHighlights module: {str(e)}")
+            self.log("Please ensure all dependencies are installed:")
+            self.log("  pip install -r requirements.txt")
+            self.status_var.set("Error")
+            messagebox.showerror("Import Error",
+                f"Failed to import VideoHighlights module:\n{str(e)}\n\n"
+                "Please ensure all dependencies are installed:\n"
+                "pip install -r requirements.txt")
+            self.processing = False
+            self.run_button.configure(state='normal')
+            return
+
         # Redirect stdout to capture print statements
         old_stdout = sys.stdout
         sys.stdout = StringIO()
