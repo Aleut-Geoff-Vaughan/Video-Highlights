@@ -205,3 +205,11 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Video Highlights specific
+VIDEOS/
+highlights_output/
+logs/
+first_frame*.jpg
+*TEMP*.mp4
+yolov8*.pt
