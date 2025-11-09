@@ -153,8 +153,14 @@ class VideoHighlightsGUI:
             gpu_color = '#d97706'  # Orange
 
         # Use tk.Label instead of ttk.Label for color support
+        # Get system background color for proper blending
+        try:
+            bg_color = self.root.cget('bg')
+        except:
+            bg_color = 'SystemButtonFace'  # Windows default
+
         gpu_value = tk.Label(hw_frame, text=gpu_status, font=('Helvetica', 9),
-                            foreground=gpu_color, background=hw_frame.cget('background'))
+                            foreground=gpu_color, background=bg_color)
         gpu_value.grid(row=1, column=1, sticky=tk.W, pady=(5, 0))
 
         # Video file selection
