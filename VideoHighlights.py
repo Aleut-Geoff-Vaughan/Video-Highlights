@@ -541,6 +541,159 @@ def draw_spotlight_overlay(video_path: str, traj: List[TrackPoint], intervals: L
 
 
 
+def process_video_highlights(
+    video_path: str,
+    output_dir: str,
+    select_player: bool = False,
+    pre_seconds: float = 2.0,
+    post_seconds: float = 6.0,
+    min_clip_duration: float = 4.0,
+    no_audio: bool = False,
+    overlay: bool = False,
+    trim_start: Optional[float] = None,
+    trim_end: Optional[float] = None,
+    threads: Optional[int] = None,
+    require_gpu: bool = False
+) -> bool:
+    """
+    Core video highlights processing function.
+    This function is used by both CLI and GUI interfaces.
+
+    Args:
+        video_path: Path to input video file
+        output_dir: Directory for output clips
+        select_player: Whether to manually select player on first frame
+        pre_seconds: Seconds before event to include
+        post_seconds: Seconds after event to include
+        min_clip_duration: Minimum clip duration after merging
+        no_audio: Disable audio-based peak detection
+        overlay: Render spotlight overlay clips
+        trim_start: Start time in seconds (None for beginning)
+        trim_end: End time in seconds (None for end)
+        threads: Number of parallel threads for clip writing
+        require_gpu: Require GPU acceleration (fail if not available)
+
+    Returns:
+        True if processing succeeded, False otherwise
+    """
+    # Check GPU requirement
+    if require_gpu:
+        import torch
+        if not torch.cuda.is_available():
+            print("ERROR: GPU acceleration is required but no CUDA-capable GPU was detected.")
+            print("Please ensure:")
+            print("  1. You have an NVIDIA GPU installed")
+            print("  2. CUDA drivers are installed (run 'nvidia-smi' to verify)")
+            print("  3. PyTorch with CUDA support is installed:")
+            print("     pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118")
+            return False
+
+    # Validate paths
+    video_path = os.path.abspath(os.path.expanduser(video_path))
+    output_dir = os.path.abspath(os.path.expanduser(output_dir))
+
+    if not os.path.exists(video_path):
+        print(f"Error: Video file not found: {video_path}")
+        return False
+
+    if not os.path.isfile(video_path):
+        print(f"Error: Path is not a file: {video_path}")
+        return False
+
+    # Print configuration
+    print(f"\nProcessing video: {video_path}")
+    print(f"Output directory: {output_dir}")
+    if trim_start is not None or trim_end is not None:
+        print(f"Trim range: {format_time(trim_start or 0)} to {format_time(trim_end) if trim_end else 'end'}")
+    print(f"Pre-event buffer: {pre_seconds}s")
+    print(f"Post-event buffer: {post_seconds}s")
+    print(f"Manual selection: {'Yes' if select_player else 'No'}")
+    print(f"Spotlight overlay: {'Yes' if overlay else 'No'}")
+    print()
+
+    ensure_dir(output_dir)
+
+    try:
+        # Create trimmed video if needed
+        original_video = video_path
+        processing_video, trim_offset = create_trimmed_video(video_path, output_dir, trim_start, trim_end)
+
+        print("[1/5] Tracking players (YOLO + ByteTrack)...")
+        tracks, fps, (W, H) = track_video(processing_video, select_roi=select_player)
+        target_id = list(tracks.keys())[0]
+        traj = tracks[target_id]
+
+        print("[2/5] Computing speed-based highlights...")
+        times, speed = compute_speed_series(traj, fps)
+        speed_intervals = detect_highlights_from_speed(times, speed, pre=pre_seconds, post=post_seconds)
+
+        audio_intervals = []
+        if not no_audio:
+            print("[3/5] Detecting audio peaks...")
+            audio_intervals = detect_audio_peaks(processing_video, pre=pre_seconds, post=post_seconds)
+
+        print("[4/5] Merging and pruning intervals...")
+        intervals = merge_intervals(speed_intervals + audio_intervals)
+
+        # Get video duration to clamp intervals
+        cap_check = cv2.VideoCapture(processing_video)
+        video_duration = cap_check.get(cv2.CAP_PROP_FRAME_COUNT) / cap_check.get(cv2.CAP_PROP_FPS) if cap_check.isOpened() else float('inf')
+        cap_check.release()
+
+        # Enforce minimum clip length and clamp to video duration
+        clamped_intervals = []
+        for s, e in intervals:
+            if (e - s) < min_clip_duration:
+                e = min(s + min_clip_duration, video_duration)
+            else:
+                e = min(e, video_duration)
+            if e > s:
+                clamped_intervals.append((s, e))
+        intervals = clamped_intervals
+
+        if not intervals:
+            print("No highlight intervals found. Try lowering thresholds or ensure --select is used.")
+            return False
+
+        # Adjust intervals back to original video timestamps if trimmed
+        original_intervals = [(s + trim_offset, e + trim_offset) for s, e in intervals]
+
+        if trim_offset > 0:
+            print(f"[info] Found {len(intervals)} highlights. Adjusting timestamps to original video (offset: +{format_time(trim_offset)})")
+
+        print("[5/5] Writing subclips...")
+        clip_paths = write_subclips(original_video, original_intervals, output_dir, max_workers=threads)
+
+        # Montage
+        if clip_paths:
+            clips = []
+            try:
+                clips = [VideoFileClip(p) for p in clip_paths]
+                montage = concatenate_videoclips(clips, method="compose")
+                montage_path = os.path.join(output_dir, "highlights_montage.mp4")
+                montage.write_videofile(montage_path, codec="libx264", audio_codec="aac")
+                montage.close()
+            finally:
+                for c in clips:
+                    c.close()
+            print(f"Wrote {len(clip_paths)} clips and a montage to: {output_dir}")
+
+        # Optional overlay rendering
+        if overlay:
+            print("[overlay] Rendering spotlight overlays (this can take a while)...")
+            overlay_workers = min(2, threads) if threads else None
+            draw_spotlight_overlay(original_video, traj, original_intervals, output_dir, max_workers=overlay_workers)
+            print("[overlay] Done.")
+
+        return True
+
+    except Exception as e:
+        print(f"Error during processing: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def main():
     ap = argparse.ArgumentParser(description="Soccer highlight generator (YOLO+ByteTrack + audio peaks)")
     ap.add_argument("--video", help="Input video path (iPhone recording)")
@@ -634,89 +787,24 @@ def main():
                     print(f"Error: {e}")
                     sys.exit(1)
 
-    print(f"\nProcessing video: {args.video}")
-    print(f"Output directory: {args.out}")
-    if trim_start_seconds is not None or trim_end_seconds is not None:
-        print(f"Trim range: {format_time(trim_start_seconds or 0)} to {format_time(trim_end_seconds) if trim_end_seconds else 'end'}")
-    print(f"Pre-event buffer: {args.pre}s")
-    print(f"Post-event buffer: {args.post}s")
-    print(f"Manual selection: {'Yes' if args.select else 'No'}")
-    print(f"Spotlight overlay: {'Yes' if args.overlay else 'No'}")
-    print()
+    # Call the core processing function
+    success = process_video_highlights(
+        video_path=args.video,
+        output_dir=args.out,
+        select_player=args.select,
+        pre_seconds=args.pre,
+        post_seconds=args.post,
+        min_clip_duration=args.min_clip,
+        no_audio=args.no_audio,
+        overlay=args.overlay,
+        trim_start=trim_start_seconds,
+        trim_end=trim_end_seconds,
+        threads=args.threads,
+        require_gpu=False  # CLI doesn't require GPU by default
+    )
 
-    ensure_dir(args.out)
-
-    # Create trimmed video if needed
-    original_video = args.video
-    processing_video, trim_offset = create_trimmed_video(args.video, args.out, trim_start_seconds, trim_end_seconds)
-
-    print("[1/5] Tracking players (YOLO + ByteTrack)...")
-    tracks, fps, (W, H) = track_video(processing_video, select_roi=args.select)
-    target_id = list(tracks.keys())[0]
-    traj = tracks[target_id]
-
-    print("[2/5] Computing speed-based highlights...")
-    times, speed = compute_speed_series(traj, fps)
-    speed_intervals = detect_highlights_from_speed(times, speed, pre=args.pre, post=args.post)
-
-    audio_intervals = []
-    if not args.no_audio:
-        print("[3/5] Detecting audio peaks...")
-        audio_intervals = detect_audio_peaks(processing_video, pre=args.pre, post=args.post)
-
-    print("[4/5] Merging and pruning intervals...")
-    intervals = merge_intervals(speed_intervals + audio_intervals)
-
-    # Get video duration to clamp intervals (use processing video duration)
-    cap_check = cv2.VideoCapture(processing_video)
-    video_duration = cap_check.get(cv2.CAP_PROP_FRAME_COUNT) / cap_check.get(cv2.CAP_PROP_FPS) if cap_check.isOpened() else float('inf')
-    cap_check.release()
-
-    # Enforce minimum clip length and clamp to video duration
-    clamped_intervals = []
-    for s, e in intervals:
-        if (e - s) < args.min_clip:
-            e = min(s + args.min_clip, video_duration)
-        else:
-            e = min(e, video_duration)
-        if e > s:  # Only add valid intervals
-            clamped_intervals.append((s, e))
-    intervals = clamped_intervals
-
-    if not intervals:
-        print("No highlight intervals found. Try lowering thresholds (edit robust_threshold k) or ensure --select is used.")
-        return
-
-    # Adjust intervals back to original video timestamps if trimmed
-    original_intervals = [(s + trim_offset, e + trim_offset) for s, e in intervals]
-
-    if trim_offset > 0:
-        print(f"[info] Found {len(intervals)} highlights. Adjusting timestamps to original video (offset: +{format_time(trim_offset)})")
-
-    print("[5/5] Writing subclips...")
-    clip_paths = write_subclips(original_video, original_intervals, args.out, max_workers=args.threads)
-
-    # Montage
-    if clip_paths:
-        clips = []
-        try:
-            clips = [VideoFileClip(p) for p in clip_paths]
-            montage = concatenate_videoclips(clips, method="compose")
-            montage_path = os.path.join(args.out, "highlights_montage.mp4")
-            montage.write_videofile(montage_path, codec="libx264", audio_codec="aac")
-            montage.close()
-        finally:
-            for c in clips:
-                c.close()
-        print(f"Wrote {len(clip_paths)} clips and a montage to: {args.out}")
-
-    # Optional overlay rendering
-    if args.overlay:
-        print("[overlay] Rendering spotlight overlays (this can take a while)...")
-        # Use fewer workers for overlay (more memory intensive)
-        overlay_workers = min(2, args.threads) if args.threads else None
-        draw_spotlight_overlay(original_video, traj, original_intervals, args.out, max_workers=overlay_workers)
-        print("[overlay] Done.")
+    if not success:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

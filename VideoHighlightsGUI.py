@@ -10,8 +10,19 @@ import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 import threading
-import subprocess
 from pathlib import Path
+from io import StringIO
+
+# Import the core processing function from VideoHighlights
+from VideoHighlights import process_video_highlights, parse_time
+
+def check_gpu_available():
+    """Check if CUDA GPU is available"""
+    try:
+        import torch
+        return torch.cuda.is_available()
+    except ImportError:
+        return False
 
 
 class VideoHighlightsGUI:
@@ -32,6 +43,7 @@ class VideoHighlightsGUI:
         self.select_player = tk.BooleanVar(value=False)
         self.overlay = tk.BooleanVar(value=False)
         self.no_audio = tk.BooleanVar(value=False)
+        self.require_gpu = tk.BooleanVar(value=False)
         self.processing = False
 
         self.setup_ui()
@@ -133,6 +145,10 @@ class VideoHighlightsGUI:
                        variable=self.no_audio).grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=3)
         row += 1
 
+        ttk.Checkbutton(main_frame, text="Require GPU acceleration (stop if not available)",
+                       variable=self.require_gpu).grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=3)
+        row += 1
+
         # Separator
         ttk.Separator(main_frame, orient='horizontal').grid(row=row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=15)
         row += 1
@@ -165,6 +181,21 @@ class VideoHighlightsGUI:
         # Configure style for accent button
         style = ttk.Style()
         style.configure('Accent.TButton', font=('Helvetica', 11, 'bold'))
+
+        # Check and display GPU status
+        self.check_gpu_status()
+
+    def check_gpu_status(self):
+        """Check and display GPU availability status"""
+        if check_gpu_available():
+            try:
+                import torch
+                gpu_name = torch.cuda.get_device_name(0)
+                self.status_var.set(f"Ready | GPU Available: {gpu_name}")
+            except:
+                self.status_var.set("Ready | GPU Available")
+        else:
+            self.status_var.set("Ready | GPU: Not Available (CPU mode)")
 
     def browse_video(self):
         filename = filedialog.askopenfilename(
@@ -218,31 +249,58 @@ class VideoHighlightsGUI:
             messagebox.showerror("Error", "Detection parameters must be valid numbers")
             return False
 
+        # Check GPU requirement
+        if self.require_gpu.get():
+            if not check_gpu_available():
+                messagebox.showerror("GPU Required",
+                    "GPU acceleration is required but no CUDA-capable GPU was detected.\n\n"
+                    "Please ensure:\n"
+                    "1. You have an NVIDIA GPU installed\n"
+                    "2. CUDA drivers are installed (run 'nvidia-smi' to verify)\n"
+                    "3. PyTorch with CUDA support is installed:\n"
+                    "   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118\n\n"
+                    "Or uncheck 'Require GPU acceleration' to run on CPU.")
+                return False
+            else:
+                import torch
+                gpu_name = torch.cuda.get_device_name(0)
+                self.log(f"GPU detected: {gpu_name}")
+                self.log(f"CUDA version: {torch.version.cuda}")
+
         return True
 
-    def build_command(self):
-        """Build the command line for VideoHighlights.py"""
-        cmd = [sys.executable, "VideoHighlights.py"]
-
-        cmd.extend(["--video", self.video_path.get()])
-        cmd.extend(["--out", self.output_dir.get()])
-        cmd.extend(["--pre", self.pre_seconds.get()])
-        cmd.extend(["--post", self.post_seconds.get()])
-        cmd.extend(["--min-clip", self.min_clip.get()])
+    def get_processing_params(self):
+        """Get parameters for the core processing function"""
+        # Parse trim times
+        trim_start = None
+        trim_end = None
 
         if self.trim_start.get():
-            cmd.extend(["--trim-start", self.trim_start.get()])
+            try:
+                trim_start = parse_time(self.trim_start.get())
+            except ValueError as e:
+                raise ValueError(f"Invalid trim start time: {e}")
+
         if self.trim_end.get():
-            cmd.extend(["--trim-end", self.trim_end.get()])
+            try:
+                trim_end = parse_time(self.trim_end.get())
+            except ValueError as e:
+                raise ValueError(f"Invalid trim end time: {e}")
 
-        if self.select_player.get():
-            cmd.append("--select")
-        if self.overlay.get():
-            cmd.append("--overlay")
-        if self.no_audio.get():
-            cmd.append("--no-audio")
-
-        return cmd
+        return {
+            'video_path': self.video_path.get(),
+            'output_dir': self.output_dir.get(),
+            'select_player': self.select_player.get(),
+            'pre_seconds': float(self.pre_seconds.get()),
+            'post_seconds': float(self.post_seconds.get()),
+            'min_clip_duration': float(self.min_clip.get()),
+            'no_audio': self.no_audio.get(),
+            'overlay': self.overlay.get(),
+            'trim_start': trim_start,
+            'trim_end': trim_end,
+            'threads': None,  # Auto-detect
+            'require_gpu': self.require_gpu.get()
+        }
 
     def run_processing(self):
         """Run the video processing in a separate thread"""
@@ -258,9 +316,13 @@ class VideoHighlightsGUI:
         self.console.delete(1.0, tk.END)
         self.console.configure(state='disabled')
 
-        # Build command
-        cmd = self.build_command()
-        self.log(f"Running command: {' '.join(cmd)}\n")
+        try:
+            params = self.get_processing_params()
+        except ValueError as e:
+            messagebox.showerror("Error", str(e))
+            return
+
+        self.log("Starting video processing...\n")
         self.log("=" * 80)
 
         # Disable run button
@@ -269,51 +331,59 @@ class VideoHighlightsGUI:
         self.status_var.set("Processing...")
 
         # Run in thread
-        thread = threading.Thread(target=self.execute_command, args=(cmd,))
+        thread = threading.Thread(target=self.execute_processing, args=(params,))
         thread.daemon = True
         thread.start()
 
-    def execute_command(self, cmd):
-        """Execute the command and capture output"""
+    def execute_processing(self, params):
+        """Execute the core processing function and capture output"""
+        # Redirect stdout to capture print statements
+        old_stdout = sys.stdout
+        sys.stdout = StringIO()
+
         try:
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                universal_newlines=True
-            )
+            # Call the core processing function
+            success = process_video_highlights(**params)
 
-            # Read output line by line
-            for line in process.stdout:
-                self.log(line.rstrip())
+            # Get captured output
+            output = sys.stdout.getvalue()
 
-            process.wait()
+            # Restore stdout
+            sys.stdout = old_stdout
 
-            if process.returncode == 0:
+            # Display output in console
+            for line in output.split('\n'):
+                if line:
+                    self.log(line)
+
+            if success:
                 self.log("\n" + "=" * 80)
                 self.log("✓ Processing completed successfully!")
                 self.status_var.set("Completed successfully")
                 messagebox.showinfo("Success",
-                                  f"Highlights generated successfully!\n\nOutput saved to:\n{self.output_dir.get()}")
+                                  f"Highlights generated successfully!\n\nOutput saved to:\n{params['output_dir']}")
             else:
                 self.log("\n" + "=" * 80)
-                self.log(f"✗ Processing failed with return code {process.returncode}")
+                self.log("✗ Processing failed")
                 self.status_var.set("Failed")
                 messagebox.showerror("Error", "Processing failed. Check the output for details.")
 
         except Exception as e:
+            # Restore stdout
+            sys.stdout = old_stdout
+
             self.log(f"\n✗ Error: {str(e)}")
+            import traceback
+            self.log(traceback.format_exc())
             self.status_var.set("Error")
             messagebox.showerror("Error", f"An error occurred:\n{str(e)}")
 
         finally:
-            # Re-enable run button
+            # Re-enable run button and restore GPU status
             self.processing = False
             self.run_button.configure(state='normal')
-            if self.status_var.get() == "Processing...":
-                self.status_var.set("Ready")
+            if self.status_var.get() in ["Processing...", "Ready"]:
+                self.check_gpu_status()
 
 
 def main():
