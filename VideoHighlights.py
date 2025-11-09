@@ -7,20 +7,30 @@ A no-subscription, local Python pipeline that:
   • Lets you lock onto your child once (interactive box selection)
   • Detects highlight moments from speed/acceleration spikes and audio peaks
   • Exports clean subclips and an optional overlay version with a spotlight circle
+  • Supports trimming long videos to focus on specific time ranges
 
 Dependencies (install):
-    pip install ultralytics==8.* opencv-python numpy tqdm moviepy librosa soundfile
+    pip install -r requirements.txt
+    # Or manually: pip install ultralytics==8.* opencv-python numpy tqdm moviepy librosa soundfile
 
 Usage examples:
-    python soccer_highlights.py \
-        --video /path/to/match.mp4 \
-        --out ./highlights_out \
-        --select  \
-        --pre 2.0 --post 6.0 --min-clip 4.0 --overlay
+    # Basic usage
+    python VideoHighlights.py --video /path/to/match.mp4 --out ./highlights_out
+
+    # With player selection and overlay
+    python VideoHighlights.py --video match.mp4 --select --overlay
+
+    # Trim long video (2nd half only - 45 min to 90 min)
+    python VideoHighlights.py --video match.mp4 --trim-start 45:00 --trim-end 1:30:00
+
+    # Interactive mode (prompts for all options)
+    python VideoHighlights.py
 
 Notes:
   • --select opens a window on the FIRST frame so you can drag a box over your child. Press ENTER/SPACE to confirm.
   • If you skip --select, the script picks the longest-lived person track (works surprisingly well when your child plays full-time).
+  • --trim-start and --trim-end accept formats: seconds (e.g., 120), MM:SS (e.g., 2:00), or HH:MM:SS (e.g., 1:30:00)
+  • Trimming creates a temporary video for processing, but final clips come from the original video
   • First run will auto-download YOLO weights.
   • Works best with 1080p/60 or 4K/60 videos recorded from a stable, elevated sideline or halfway-line vantage.
 """
@@ -44,9 +54,14 @@ import librosa
 try:
     from moviepy.editor import VideoFileClip, concatenate_videoclips
 except ImportError:
-    # moviepy 2.x has different import structure
-    from moviepy.video.io.VideoFileClip import VideoFileClip
-    from moviepy.video.compositing.CompositeVideoClip import concatenate_videoclips
+    try:
+        # moviepy 2.x has different import structure
+        from moviepy.video.io.VideoFileClip import VideoFileClip
+        from moviepy.video.compositing.CompositeVideoClip import concatenate_videoclips
+    except ImportError as e:
+        print(f"Error: Could not import moviepy. Please install it with: pip install moviepy")
+        print(f"Details: {e}")
+        sys.exit(1)
 
 
 @dataclass
@@ -57,6 +72,99 @@ class TrackPoint:
 
 def ensure_dir(p: str):
     os.makedirs(p, exist_ok=True)
+
+
+def parse_time(time_str: str) -> float:
+    """Parse time string to seconds. Supports formats: seconds (123), MM:SS (12:30), HH:MM:SS (1:23:45)"""
+    if not time_str:
+        return 0.0
+
+    time_str = time_str.strip()
+
+    # Try parsing as plain seconds first
+    try:
+        return float(time_str)
+    except ValueError:
+        pass
+
+    # Parse as time format (MM:SS or HH:MM:SS)
+    parts = time_str.split(':')
+    if len(parts) == 2:  # MM:SS
+        try:
+            minutes, seconds = map(float, parts)
+            return minutes * 60 + seconds
+        except ValueError:
+            raise ValueError(f"Invalid time format: {time_str}. Use MM:SS, HH:MM:SS, or seconds")
+    elif len(parts) == 3:  # HH:MM:SS
+        try:
+            hours, minutes, seconds = map(float, parts)
+            return hours * 3600 + minutes * 60 + seconds
+        except ValueError:
+            raise ValueError(f"Invalid time format: {time_str}. Use MM:SS, HH:MM:SS, or seconds")
+    else:
+        raise ValueError(f"Invalid time format: {time_str}. Use MM:SS, HH:MM:SS, or seconds")
+
+
+def format_time(seconds: float) -> str:
+    """Format seconds to HH:MM:SS string"""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    if hours > 0:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    else:
+        return f"{minutes}:{secs:02d}"
+
+
+def create_trimmed_video(video_path: str, out_dir: str, start_time: Optional[float] = None, end_time: Optional[float] = None) -> Tuple[str, float]:
+    """
+    Create a trimmed version of the video for processing.
+    Returns: (trimmed_video_path, trim_offset_seconds)
+    If no trimming needed, returns original path with 0 offset.
+    """
+    if start_time is None and end_time is None:
+        return video_path, 0.0
+
+    # Get video duration
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video: {video_path}")
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    duration = total_frames / fps if total_frames and fps else 0.0
+    cap.release()
+
+    start_time = start_time or 0.0
+    end_time = end_time or duration
+
+    # Validate times
+    if start_time < 0:
+        start_time = 0.0
+    if end_time > duration:
+        end_time = duration
+    if start_time >= end_time:
+        raise ValueError(f"Invalid trim times: start ({format_time(start_time)}) must be before end ({format_time(end_time)})")
+
+    print(f"\n[trim] Creating trimmed video from {format_time(start_time)} to {format_time(end_time)} (duration: {format_time(end_time - start_time)})")
+
+    # Create trimmed video
+    ensure_dir(out_dir)
+    trimmed_path = os.path.join(out_dir, "trimmed_working_video.mp4")
+
+    try:
+        with VideoFileClip(video_path) as clip:
+            # Try both subclip and subclipped (different moviepy versions)
+            try:
+                trimmed_clip = clip.subclip(start_time, end_time)
+            except AttributeError:
+                trimmed_clip = clip.subclipped(start_time, end_time)
+
+            trimmed_clip.write_videofile(trimmed_path, codec="libx264", audio_codec="aac")
+            trimmed_clip.close()
+        print(f"[trim] Trimmed video saved to: {trimmed_path}")
+        return trimmed_path, start_time
+    except Exception as e:
+        raise RuntimeError(f"Failed to create trimmed video: {e}")
 
 
 def iou_xyxy(a: np.ndarray, b: np.ndarray) -> float:
@@ -143,6 +251,10 @@ def track_video(video_path: str, fps_hint: Optional[float] = None, select_roi: b
 
     # Choose target ID
     target_id = None
+
+    if not tracks:
+        raise RuntimeError("No player tracks detected in video. Ensure the video contains visible people.")
+
     if user_box is not None:
         # Pick ID whose early boxes overlap the user's box best within first 3 seconds
         best_iou = -1.0
@@ -165,9 +277,14 @@ def track_video(video_path: str, fps_hint: Optional[float] = None, select_roi: b
             if pseudo_iou > best_iou:
                 best_iou = pseudo_iou
                 target_id = tid
+
+        if target_id is None:
+            # Fallback if no tracks match the user selection
+            print("[warn] No tracks matched your selection. Using longest-lived track instead.")
+            target_id = max(tracks.keys(), key=lambda k: (tracks[k][-1].t - tracks[k][0].t))
     else:
         # default: longest-lived track
-        target_id = max(tracks.keys(), key=lambda k: (tracks[k][-1].t - tracks[k][0].t)) if tracks else None
+        target_id = max(tracks.keys(), key=lambda k: (tracks[k][-1].t - tracks[k][0].t))
 
     if target_id is None:
         raise RuntimeError("No player track found. Try using --select on the first frame.")
@@ -223,16 +340,33 @@ def detect_audio_peaks(video_path: str, pre: float, post: float) -> List[Tuple[f
 
 def write_subclips(video_path: str, intervals: List[Tuple[float, float]], out_dir: str) -> List[str]:
     paths = []
-    with VideoFileClip(video_path) as clip:
+    clip = None
+    try:
+        clip = VideoFileClip(video_path)
         for k, (s, e) in enumerate(intervals, start=1):
             s = max(0.0, s)
             e = min(clip.duration, e)
             if e - s <= 0.25:
                 continue
-            sub = clip.subclip(s, e)
-            out_path = os.path.join(out_dir, f"highlight_{k:02d}.mp4")
-            sub.write_videofile(out_path, codec="libx264", audio_codec="aac", verbose=False, logger=None)
-            paths.append(out_path)
+            sub = None
+            try:
+                # Try both subclip and subclipped (different moviepy versions)
+                try:
+                    sub = clip.subclip(s, e)
+                except AttributeError:
+                    sub = clip.subclipped(s, e)
+
+                out_path = os.path.join(out_dir, f"highlight_{k:02d}.mp4")
+                sub.write_videofile(out_path, codec="libx264", audio_codec="aac")
+                paths.append(out_path)
+            except Exception as e:
+                print(f"[warn] Failed to write clip {k} ({s:.1f}s - {e:.1f}s): {e}")
+            finally:
+                if sub is not None:
+                    sub.close()
+    finally:
+        if clip is not None:
+            clip.close()
     return paths
 
 
@@ -257,16 +391,20 @@ def draw_spotlight_overlay(video_path: str, traj: List[TrackPoint], intervals: L
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
         # Seek to start
-        cap.set(cv2.CAP_PROP_POS_MSEC, s * 1000.0)
+        seek_success = cap.set(cv2.CAP_PROP_POS_MSEC, s * 1000.0)
+        if not seek_success:
+            print(f"[warn] Failed to seek to {s}s for overlay {k}, starting from beginning")
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
+        temp_path = os.path.join(out_dir, f"highlight_{k:02d}_spotlight_temp.mp4")
         out_path = os.path.join(out_dir, f"highlight_{k:02d}_spotlight.mp4")
         fourcc = cv2.VideoWriter_fourcc(*"avc1")
-        writer = cv2.VideoWriter(out_path, fourcc, fps, (width, height))
+        writer = cv2.VideoWriter(temp_path, fourcc, fps, (width, height))
 
         if not writer.isOpened():
-            print(f"[warn] Could not open writer for {out_path}, trying alternate codec...")
+            print(f"[warn] Could not open writer for {temp_path}, trying alternate codec...")
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-            writer = cv2.VideoWriter(out_path, fourcc, fps, (width, height))
+            writer = cv2.VideoWriter(temp_path, fourcc, fps, (width, height))
 
         frames_needed = int((e - s) * fps)
         try:
@@ -284,6 +422,31 @@ def draw_spotlight_overlay(video_path: str, traj: List[TrackPoint], intervals: L
             writer.release()
             cap.release()
 
+        # Add audio using moviepy
+        try:
+            with VideoFileClip(video_path) as source_clip:
+                with VideoFileClip(temp_path) as video_only:
+                    # Extract audio from the same time interval (handle different moviepy versions)
+                    try:
+                        audio_subclip = source_clip.subclip(s, e)
+                    except AttributeError:
+                        audio_subclip = source_clip.subclipped(s, e)
+                    audio_clip = audio_subclip.audio
+                    if audio_clip is not None:
+                        final_clip = video_only.set_audio(audio_clip)
+                        final_clip.write_videofile(out_path, codec="libx264", audio_codec="aac")
+                        final_clip.close()
+                    else:
+                        # No audio in source, just rename temp file
+                        os.rename(temp_path, out_path)
+            # Clean up temp file if it still exists
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except Exception as e:
+            print(f"[warn] Could not add audio to overlay {k}: {e}. Using video-only version.")
+            if os.path.exists(temp_path):
+                os.rename(temp_path, out_path)
+
 
 def main():
     ap = argparse.ArgumentParser(description="Soccer highlight generator (YOLO+ByteTrack + audio peaks)")
@@ -295,6 +458,8 @@ def main():
     ap.add_argument("--min-clip", type=float, default=4.0, help="Minimum clip duration (after merging)")
     ap.add_argument("--no-audio", action="store_true", help="Disable audio-based peak detection")
     ap.add_argument("--overlay", action="store_true", help="Render spotlight overlay clips (slower)")
+    ap.add_argument("--trim-start", type=str, help="Trim video start time (format: MM:SS or HH:MM:SS or seconds)")
+    ap.add_argument("--trim-end", type=str, help="Trim video end time (format: MM:SS or HH:MM:SS or seconds)")
     args = ap.parse_args()
 
     # Interactive mode if video or output not provided
@@ -310,9 +475,22 @@ def main():
         out_input = input(f"Enter output directory (default: {default_out}): ").strip()
         args.out = out_input if out_input else default_out
 
+    # Validate and normalize paths
+    args.video = os.path.abspath(os.path.expanduser(args.video))
+    args.out = os.path.abspath(os.path.expanduser(args.out))
+
     if not os.path.exists(args.video):
         print(f"Error: Video file not found: {args.video}")
         sys.exit(1)
+
+    if not os.path.isfile(args.video):
+        print(f"Error: Path is not a file: {args.video}")
+        sys.exit(1)
+
+    # Validate video file extension
+    valid_extensions = {'.mp4', '.mov', '.avi', '.mkv', '.m4v', '.MP4', '.MOV', '.AVI', '.MKV', '.M4V'}
+    if not any(args.video.endswith(ext) for ext in valid_extensions):
+        print(f"Warning: File extension may not be a valid video format: {args.video}")
 
     # Ask about player selection if not already set
     if not args.select and sys.stdin.isatty():
@@ -324,8 +502,48 @@ def main():
         overlay_input = input("Do you want to render spotlight overlay clips? (slower) (y/N): ").strip().lower()
         args.overlay = overlay_input in ['y', 'yes']
 
+    # Ask about trimming if not already set
+    trim_start_seconds = None
+    trim_end_seconds = None
+
+    if args.trim_start:
+        try:
+            trim_start_seconds = parse_time(args.trim_start)
+        except ValueError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+
+    if args.trim_end:
+        try:
+            trim_end_seconds = parse_time(args.trim_end)
+        except ValueError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+
+    # Interactive trim prompts
+    if not args.trim_start and not args.trim_end and sys.stdin.isatty():
+        trim_input = input("Do you want to trim the video to a specific time range? (y/N): ").strip().lower()
+        if trim_input in ['y', 'yes']:
+            start_input = input("Enter start time (MM:SS, HH:MM:SS, or seconds) [press Enter for beginning]: ").strip()
+            if start_input:
+                try:
+                    trim_start_seconds = parse_time(start_input)
+                except ValueError as e:
+                    print(f"Error: {e}")
+                    sys.exit(1)
+
+            end_input = input("Enter end time (MM:SS, HH:MM:SS, or seconds) [press Enter for end]: ").strip()
+            if end_input:
+                try:
+                    trim_end_seconds = parse_time(end_input)
+                except ValueError as e:
+                    print(f"Error: {e}")
+                    sys.exit(1)
+
     print(f"\nProcessing video: {args.video}")
     print(f"Output directory: {args.out}")
+    if trim_start_seconds is not None or trim_end_seconds is not None:
+        print(f"Trim range: {format_time(trim_start_seconds or 0)} to {format_time(trim_end_seconds) if trim_end_seconds else 'end'}")
     print(f"Pre-event buffer: {args.pre}s")
     print(f"Post-event buffer: {args.post}s")
     print(f"Manual selection: {'Yes' if args.select else 'No'}")
@@ -334,8 +552,12 @@ def main():
 
     ensure_dir(args.out)
 
+    # Create trimmed video if needed
+    original_video = args.video
+    processing_video, trim_offset = create_trimmed_video(args.video, args.out, trim_start_seconds, trim_end_seconds)
+
     print("[1/5] Tracking players (YOLO + ByteTrack)...")
-    tracks, fps, (W, H) = track_video(args.video, select_roi=args.select)
+    tracks, fps, (W, H) = track_video(processing_video, select_roi=args.select)
     target_id = list(tracks.keys())[0]
     traj = tracks[target_id]
 
@@ -346,20 +568,39 @@ def main():
     audio_intervals = []
     if not args.no_audio:
         print("[3/5] Detecting audio peaks...")
-        audio_intervals = detect_audio_peaks(args.video, pre=args.pre, post=args.post)
+        audio_intervals = detect_audio_peaks(processing_video, pre=args.pre, post=args.post)
 
     print("[4/5] Merging and pruning intervals...")
     intervals = merge_intervals(speed_intervals + audio_intervals)
 
-    # Enforce minimum clip length
-    intervals = [(s, e) if (e - s) >= args.min_clip else (s, s + args.min_clip) for (s, e) in intervals]
+    # Get video duration to clamp intervals (use processing video duration)
+    cap_check = cv2.VideoCapture(processing_video)
+    video_duration = cap_check.get(cv2.CAP_PROP_FRAME_COUNT) / cap_check.get(cv2.CAP_PROP_FPS) if cap_check.isOpened() else float('inf')
+    cap_check.release()
+
+    # Enforce minimum clip length and clamp to video duration
+    clamped_intervals = []
+    for s, e in intervals:
+        if (e - s) < args.min_clip:
+            e = min(s + args.min_clip, video_duration)
+        else:
+            e = min(e, video_duration)
+        if e > s:  # Only add valid intervals
+            clamped_intervals.append((s, e))
+    intervals = clamped_intervals
 
     if not intervals:
         print("No highlight intervals found. Try lowering thresholds (edit robust_threshold k) or ensure --select is used.")
         return
 
+    # Adjust intervals back to original video timestamps if trimmed
+    original_intervals = [(s + trim_offset, e + trim_offset) for s, e in intervals]
+
+    if trim_offset > 0:
+        print(f"[info] Found {len(intervals)} highlights. Adjusting timestamps to original video (offset: +{format_time(trim_offset)})")
+
     print("[5/5] Writing subclips...")
-    clip_paths = write_subclips(args.video, intervals, args.out)
+    clip_paths = write_subclips(original_video, original_intervals, args.out)
 
     # Montage
     if clip_paths:
@@ -368,7 +609,7 @@ def main():
             clips = [VideoFileClip(p) for p in clip_paths]
             montage = concatenate_videoclips(clips, method="compose")
             montage_path = os.path.join(args.out, "highlights_montage.mp4")
-            montage.write_videofile(montage_path, codec="libx264", audio_codec="aac", verbose=False, logger=None)
+            montage.write_videofile(montage_path, codec="libx264", audio_codec="aac")
             montage.close()
         finally:
             for c in clips:
@@ -378,7 +619,7 @@ def main():
     # Optional overlay rendering
     if args.overlay:
         print("[overlay] Rendering spotlight overlays (this can take a while)...")
-        draw_spotlight_overlay(args.video, traj, intervals, args.out)
+        draw_spotlight_overlay(original_video, traj, original_intervals, args.out)
         print("[overlay] Done.")
 
 

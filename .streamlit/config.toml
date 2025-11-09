@@ -1,0 +1,10 @@
+[server]
+# Increase max upload size to 50GB (50000 MB)
+maxUploadSize = 50000
+
+# Allow larger message sizes for processing
+maxMessageSize = 50000
+
+[browser]
+# Automatically open browser (set to false in remote environments)
+gatherUsageStats = false

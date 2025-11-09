@@ -1,0 +1,25 @@
+# Video Highlights Generator - Python Dependencies
+
+# Computer Vision & Object Tracking
+ultralytics>=8.0.0,<9.0.0
+opencv-python>=4.5.0
+
+# Data Processing
+numpy>=1.19.0
+
+# Progress Bars
+tqdm>=4.60.0
+
+# Video Processing
+moviepy>=1.0.0
+
+# Audio Processing
+librosa>=0.9.0
+soundfile>=0.10.0
+
+# Web Interface
+streamlit>=1.28.0
+
+# Optional: For better performance
+# torch>=2.0.0  # Uncomment if you want to use GPU acceleration with YOLO
+# torchvision>=0.15.0
