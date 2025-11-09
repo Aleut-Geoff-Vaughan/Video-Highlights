@@ -3,15 +3,21 @@ Soccer Highlight Agent
 ----------------------
 
 A no-subscription, local Python pipeline that:
-  • Tracks all players with YOLO + ByteTrack
+  • Tracks all players with YOLO + ByteTrack (GPU-accelerated with CUDA)
   • Lets you lock onto your child once (interactive box selection)
   • Detects highlight moments from speed/acceleration spikes and audio peaks
   • Exports clean subclips and an optional overlay version with a spotlight circle
   • Supports trimming long videos to focus on specific time ranges
+  • Multithreaded clip generation for faster processing
 
 Dependencies (install):
     pip install -r requirements.txt
-    # Or manually: pip install ultralytics==8.* opencv-python numpy tqdm moviepy librosa soundfile
+    # Or manually: pip install ultralytics==8.* opencv-python numpy tqdm moviepy librosa soundfile torch
+
+Performance:
+  • Automatically uses CUDA GPU if available (2-3x faster inference)
+  • Parallel clip writing with configurable thread count (--threads)
+  • Half-precision (FP16) inference on GPU for maximum speed
 
 Usage examples:
     # Basic usage
@@ -23,6 +29,9 @@ Usage examples:
     # Trim long video (2nd half only - 45 min to 90 min)
     python VideoHighlights.py --video match.mp4 --trim-start 45:00 --trim-end 1:30:00
 
+    # Faster processing with custom thread count
+    python VideoHighlights.py --video match.mp4 --threads 8
+
     # Interactive mode (prompts for all options)
     python VideoHighlights.py
 
@@ -30,9 +39,11 @@ Notes:
   • --select opens a window on the FIRST frame so you can drag a box over your child. Press ENTER/SPACE to confirm.
   • If you skip --select, the script picks the longest-lived person track (works surprisingly well when your child plays full-time).
   • --trim-start and --trim-end accept formats: seconds (e.g., 120), MM:SS (e.g., 2:00), or HH:MM:SS (e.g., 1:30:00)
+  • --threads controls parallel clip writing (default: auto, max 4). Higher values = faster but more memory.
   • Trimming creates a temporary video for processing, but final clips come from the original video
-  • First run will auto-download YOLO weights.
+  • First run will auto-download YOLO weights (~6MB).
   • Works best with 1080p/60 or 4K/60 videos recorded from a stable, elevated sideline or halfway-line vantage.
+  • GPU acceleration requires PyTorch with CUDA: pip install torch --index-url https://download.pytorch.org/whl/cu118
 """
 
 import os
@@ -41,6 +52,8 @@ import math
 import argparse
 from dataclasses import dataclass
 from typing import List, Tuple, Dict, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import multiprocessing
 
 import numpy as np
 import cv2
@@ -230,10 +243,17 @@ def track_video(video_path: str, fps_hint: Optional[float] = None, select_roi: b
     # YOLO tracking (persons + sports ball for potential future use)
     model = YOLO("yolov8n.pt")
 
+    # Enable GPU if available and use half precision for faster inference
+    import torch
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print(f"[performance] Using device: {device}")
+    if device == 'cuda':
+        print(f"[performance] GPU: {torch.cuda.get_device_name(0)}")
+
     # The stream=True iterator yields per-frame results with .boxes and .boxes.id
     tracks: Dict[int, List[TrackPoint]] = {}
 
-    for frame_idx, result in enumerate(model.track(source=video_path, stream=True, tracker="bytetrack.yaml", classes=[0, 32])):
+    for frame_idx, result in enumerate(model.track(source=video_path, stream=True, tracker="bytetrack.yaml", classes=[0, 32], device=device, half=True if device == 'cuda' else False, verbose=False)):
         # We mostly care about persons (class 0). result.boxes.cls, .id, .xyxy
         if result.boxes is None or result.boxes.id is None:
             continue
@@ -338,40 +358,79 @@ def detect_audio_peaks(video_path: str, pre: float, post: float) -> List[Tuple[f
         return []
 
 
-def write_subclips(video_path: str, intervals: List[Tuple[float, float]], out_dir: str) -> List[str]:
-    paths = []
+def write_single_subclip(video_path: str, interval: Tuple[float, float], clip_num: int, out_dir: str) -> Optional[str]:
+    """Write a single subclip (used for parallel processing)"""
+    s, e = interval
     clip = None
+    sub = None
     try:
         clip = VideoFileClip(video_path)
-        for k, (s, e) in enumerate(intervals, start=1):
-            s = max(0.0, s)
-            e = min(clip.duration, e)
-            if e - s <= 0.25:
-                continue
-            sub = None
-            try:
-                # Try both subclip and subclipped (different moviepy versions)
-                try:
-                    sub = clip.subclip(s, e)
-                except AttributeError:
-                    sub = clip.subclipped(s, e)
+        s = max(0.0, s)
+        e = min(clip.duration, e)
+        if e - s <= 0.25:
+            return None
 
-                out_path = os.path.join(out_dir, f"highlight_{k:02d}.mp4")
-                sub.write_videofile(out_path, codec="libx264", audio_codec="aac")
-                paths.append(out_path)
-            except Exception as e:
-                print(f"[warn] Failed to write clip {k} ({s:.1f}s - {e:.1f}s): {e}")
-            finally:
-                if sub is not None:
-                    sub.close()
+        # Try both subclip and subclipped (different moviepy versions)
+        try:
+            sub = clip.subclip(s, e)
+        except AttributeError:
+            sub = clip.subclipped(s, e)
+
+        out_path = os.path.join(out_dir, f"highlight_{clip_num:02d}.mp4")
+        # Try with audio first, fallback to no audio if it fails
+        try:
+            sub.write_videofile(out_path, codec="libx264", audio_codec="aac", logger=None, threads=2)
+        except (AttributeError, OSError) as audio_err:
+            print(f"[warn] Audio processing failed for clip {clip_num}, retrying without audio: {audio_err}")
+            sub.write_videofile(out_path, codec="libx264", audio=False, logger=None, threads=2)
+        return out_path
+    except Exception as ex:
+        print(f"[warn] Failed to write clip {clip_num} ({s:.1f}s - {e:.1f}s): {ex}")
+        return None
     finally:
+        if sub is not None:
+            sub.close()
         if clip is not None:
             clip.close()
+
+
+def write_subclips(video_path: str, intervals: List[Tuple[float, float]], out_dir: str, max_workers: Optional[int] = None) -> List[str]:
+    """Write multiple subclips using parallel processing"""
+    if max_workers is None:
+        # Use CPU count, but cap at 4 to avoid overwhelming the system
+        max_workers = min(4, multiprocessing.cpu_count())
+
+    print(f"[performance] Writing {len(intervals)} clips using {max_workers} parallel workers")
+
+    paths = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all clip writing tasks
+        future_to_clip = {
+            executor.submit(write_single_subclip, video_path, interval, k, out_dir): k
+            for k, interval in enumerate(intervals, start=1)
+        }
+
+        # Collect results as they complete with progress bar
+        with tqdm(total=len(intervals), desc="Writing clips", unit="clip") as pbar:
+            for future in as_completed(future_to_clip):
+                clip_num = future_to_clip[future]
+                try:
+                    result = future.result()
+                    if result:
+                        paths.append(result)
+                except Exception as exc:
+                    print(f"[warn] Clip {clip_num} generated an exception: {exc}")
+                pbar.update(1)
+
+    # Sort paths by clip number to maintain order
+    paths.sort()
     return paths
 
 
-def draw_spotlight_overlay(video_path: str, traj: List[TrackPoint], intervals: List[Tuple[float, float]], out_dir: str, radius: int = 35):
-    # Index trajectory by time for quick nearest lookup
+def draw_single_spotlight_overlay(video_path: str, traj: List[TrackPoint], interval: Tuple[float, float],
+                                   clip_num: int, out_dir: str, radius: int = 35) -> Optional[str]:
+    """Draw spotlight overlay for a single clip (used for parallel processing)"""
+    s, e = interval
     t_arr = np.array([p.t for p in traj])
     xy_arr = np.array([p.xy for p in traj])
 
@@ -381,23 +440,22 @@ def draw_spotlight_overlay(video_path: str, traj: List[TrackPoint], intervals: L
         x, y = xy_arr[idx]
         return int(round(x)), int(round(y))
 
-    for k, (s, e) in enumerate(intervals, start=1):
+    try:
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
-            raise RuntimeError("Failed to open video during overlay stage.")
+            raise RuntimeError(f"Failed to open video for overlay {clip_num}")
         fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        total = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
         # Seek to start
         seek_success = cap.set(cv2.CAP_PROP_POS_MSEC, s * 1000.0)
         if not seek_success:
-            print(f"[warn] Failed to seek to {s}s for overlay {k}, starting from beginning")
+            print(f"[warn] Failed to seek to {s}s for overlay {clip_num}, starting from beginning")
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
-        temp_path = os.path.join(out_dir, f"highlight_{k:02d}_spotlight_temp.mp4")
-        out_path = os.path.join(out_dir, f"highlight_{k:02d}_spotlight.mp4")
+        temp_path = os.path.join(out_dir, f"highlight_{clip_num:02d}_spotlight_temp.mp4")
+        out_path = os.path.join(out_dir, f"highlight_{clip_num:02d}_spotlight.mp4")
         fourcc = cv2.VideoWriter_fourcc(*"avc1")
         writer = cv2.VideoWriter(temp_path, fourcc, fps, (width, height))
 
@@ -407,26 +465,25 @@ def draw_spotlight_overlay(video_path: str, traj: List[TrackPoint], intervals: L
             writer = cv2.VideoWriter(temp_path, fourcc, fps, (width, height))
 
         frames_needed = int((e - s) * fps)
-        try:
-            for _ in tqdm(range(frames_needed), desc=f"overlay {k}"):
-                ok, frame = cap.read()
-                if not ok:
-                    break
-                t = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
-                cx, cy = pos_at(t)
-                # Draw soft circle
-                cv2.circle(frame, (cx, cy), radius, (255, 255, 255), 2)
-                cv2.circle(frame, (cx, cy), radius + 6, (0, 0, 0), 2)
-                writer.write(frame)
-        finally:
-            writer.release()
-            cap.release()
+        for _ in range(frames_needed):
+            ok, frame = cap.read()
+            if not ok:
+                break
+            t = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+            cx, cy = pos_at(t)
+            # Draw soft circle
+            cv2.circle(frame, (cx, cy), radius, (255, 255, 255), 2)
+            cv2.circle(frame, (cx, cy), radius + 6, (0, 0, 0), 2)
+            writer.write(frame)
+
+        writer.release()
+        cap.release()
 
         # Add audio using moviepy
         try:
             with VideoFileClip(video_path) as source_clip:
                 with VideoFileClip(temp_path) as video_only:
-                    # Extract audio from the same time interval (handle different moviepy versions)
+                    # Extract audio from the same time interval
                     try:
                         audio_subclip = source_clip.subclip(s, e)
                     except AttributeError:
@@ -434,7 +491,7 @@ def draw_spotlight_overlay(video_path: str, traj: List[TrackPoint], intervals: L
                     audio_clip = audio_subclip.audio
                     if audio_clip is not None:
                         final_clip = video_only.set_audio(audio_clip)
-                        final_clip.write_videofile(out_path, codec="libx264", audio_codec="aac")
+                        final_clip.write_videofile(out_path, codec="libx264", audio_codec="aac", logger=None)
                         final_clip.close()
                     else:
                         # No audio in source, just rename temp file
@@ -442,10 +499,46 @@ def draw_spotlight_overlay(video_path: str, traj: List[TrackPoint], intervals: L
             # Clean up temp file if it still exists
             if os.path.exists(temp_path):
                 os.remove(temp_path)
+            return out_path
         except Exception as e:
-            print(f"[warn] Could not add audio to overlay {k}: {e}. Using video-only version.")
+            print(f"[warn] Could not add audio to overlay {clip_num}: {e}. Using video-only version.")
             if os.path.exists(temp_path):
                 os.rename(temp_path, out_path)
+            return out_path
+    except Exception as ex:
+        print(f"[warn] Failed to create overlay for clip {clip_num}: {ex}")
+        return None
+
+
+def draw_spotlight_overlay(video_path: str, traj: List[TrackPoint], intervals: List[Tuple[float, float]],
+                           out_dir: str, radius: int = 35, max_workers: Optional[int] = None):
+    """Draw spotlight overlays using parallel processing"""
+    if max_workers is None:
+        # Use fewer workers for overlay (more memory intensive)
+        max_workers = min(2, multiprocessing.cpu_count())
+
+    print(f"[performance] Rendering {len(intervals)} overlays using {max_workers} parallel workers")
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all overlay rendering tasks
+        future_to_clip = {
+            executor.submit(draw_single_spotlight_overlay, video_path, traj, interval, k, out_dir, radius): k
+            for k, interval in enumerate(intervals, start=1)
+        }
+
+        # Collect results as they complete with progress bar
+        with tqdm(total=len(intervals), desc="Rendering overlays", unit="clip") as pbar:
+            for future in as_completed(future_to_clip):
+                clip_num = future_to_clip[future]
+                try:
+                    result = future.result()
+                    if not result:
+                        print(f"[warn] Failed to render overlay for clip {clip_num}")
+                except Exception as exc:
+                    print(f"[warn] Overlay {clip_num} generated an exception: {exc}")
+                pbar.update(1)
+
+
 
 
 def main():
@@ -460,6 +553,7 @@ def main():
     ap.add_argument("--overlay", action="store_true", help="Render spotlight overlay clips (slower)")
     ap.add_argument("--trim-start", type=str, help="Trim video start time (format: MM:SS or HH:MM:SS or seconds)")
     ap.add_argument("--trim-end", type=str, help="Trim video end time (format: MM:SS or HH:MM:SS or seconds)")
+    ap.add_argument("--threads", type=int, default=None, help="Number of parallel threads for clip writing (default: auto, max 4)")
     args = ap.parse_args()
 
     # Interactive mode if video or output not provided
@@ -600,7 +694,7 @@ def main():
         print(f"[info] Found {len(intervals)} highlights. Adjusting timestamps to original video (offset: +{format_time(trim_offset)})")
 
     print("[5/5] Writing subclips...")
-    clip_paths = write_subclips(original_video, original_intervals, args.out)
+    clip_paths = write_subclips(original_video, original_intervals, args.out, max_workers=args.threads)
 
     # Montage
     if clip_paths:
@@ -619,7 +713,9 @@ def main():
     # Optional overlay rendering
     if args.overlay:
         print("[overlay] Rendering spotlight overlays (this can take a while)...")
-        draw_spotlight_overlay(original_video, traj, original_intervals, args.out)
+        # Use fewer workers for overlay (more memory intensive)
+        overlay_workers = min(2, args.threads) if args.threads else None
+        draw_spotlight_overlay(original_video, traj, original_intervals, args.out, max_workers=overlay_workers)
         print("[overlay] Done.")
 
 
