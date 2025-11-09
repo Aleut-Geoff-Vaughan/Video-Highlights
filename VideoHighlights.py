@@ -358,8 +358,27 @@ def detect_audio_peaks(video_path: str, pre: float, post: float) -> List[Tuple[f
         return []
 
 
-def write_single_subclip(video_path: str, interval: Tuple[float, float], clip_num: int, out_dir: str) -> Optional[str]:
+def check_nvenc_available() -> bool:
+    """Check if NVENC GPU encoding is available"""
+    try:
+        import subprocess
+        result = subprocess.run(['ffmpeg', '-hide_banner', '-encoders'],
+                              capture_output=True, text=True, timeout=5)
+        return 'h264_nvenc' in result.stdout
+    except:
+        return False
+
+# Global flag for NVENC availability (checked once)
+_NVENC_AVAILABLE = None
+
+def write_single_subclip(video_path: str, interval: Tuple[float, float], clip_num: int, out_dir: str, use_gpu_encoding: bool = True) -> Optional[str]:
     """Write a single subclip (used for parallel processing)"""
+    global _NVENC_AVAILABLE
+
+    # Check NVENC availability once
+    if _NVENC_AVAILABLE is None:
+        _NVENC_AVAILABLE = check_nvenc_available() if use_gpu_encoding else False
+
     s, e = interval
     clip = None
     sub = None
@@ -377,12 +396,25 @@ def write_single_subclip(video_path: str, interval: Tuple[float, float], clip_nu
             sub = clip.subclipped(s, e)
 
         out_path = os.path.join(out_dir, f"highlight_{clip_num:02d}.mp4")
+
+        # Choose codec based on availability
+        codec = "h264_nvenc" if _NVENC_AVAILABLE else "libx264"
+        codec_params = []
+        if _NVENC_AVAILABLE:
+            # NVENC parameters for faster encoding
+            codec_params = ['-preset', 'fast', '-b:v', '5M']
+        else:
+            # libx264 parameters for faster encoding
+            codec_params = ['-preset', 'faster', '-crf', '23']
+
         # Try with audio first, fallback to no audio if it fails
         try:
-            sub.write_videofile(out_path, codec="libx264", audio_codec="aac", logger=None, threads=2)
+            sub.write_videofile(out_path, codec=codec, audio_codec="aac", logger=None,
+                              threads=2, ffmpeg_params=codec_params)
         except (AttributeError, OSError) as audio_err:
             print(f"[warn] Audio processing failed for clip {clip_num}, retrying without audio: {audio_err}")
-            sub.write_videofile(out_path, codec="libx264", audio=False, logger=None, threads=2)
+            sub.write_videofile(out_path, codec=codec, audio=False, logger=None,
+                              threads=2, ffmpeg_params=codec_params)
         return out_path
     except Exception as ex:
         print(f"[warn] Failed to write clip {clip_num} ({s:.1f}s - {e:.1f}s): {ex}")
@@ -394,19 +426,26 @@ def write_single_subclip(video_path: str, interval: Tuple[float, float], clip_nu
             clip.close()
 
 
-def write_subclips(video_path: str, intervals: List[Tuple[float, float]], out_dir: str, max_workers: Optional[int] = None) -> List[str]:
+def write_subclips(video_path: str, intervals: List[Tuple[float, float]], out_dir: str, max_workers: Optional[int] = None, use_gpu_encoding: bool = True) -> List[str]:
     """Write multiple subclips using parallel processing"""
     if max_workers is None:
-        # Use CPU count, but cap at 4 to avoid overwhelming the system
-        max_workers = min(4, multiprocessing.cpu_count())
+        # Use up to 75% of CPU count to avoid overwhelming the system
+        max_workers = max(2, int(multiprocessing.cpu_count() * 0.75))
 
+    # Check encoding method
+    global _NVENC_AVAILABLE
+    if _NVENC_AVAILABLE is None and use_gpu_encoding:
+        _NVENC_AVAILABLE = check_nvenc_available()
+
+    encoding_method = "GPU (NVENC)" if _NVENC_AVAILABLE else "CPU (x264)"
     print(f"[performance] Writing {len(intervals)} clips using {max_workers} parallel workers")
+    print(f"[performance] Video encoding: {encoding_method}")
 
     paths = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit all clip writing tasks
         future_to_clip = {
-            executor.submit(write_single_subclip, video_path, interval, k, out_dir): k
+            executor.submit(write_single_subclip, video_path, interval, k, out_dir, use_gpu_encoding): k
             for k, interval in enumerate(intervals, start=1)
         }
 
@@ -514,8 +553,8 @@ def draw_spotlight_overlay(video_path: str, traj: List[TrackPoint], intervals: L
                            out_dir: str, radius: int = 35, max_workers: Optional[int] = None):
     """Draw spotlight overlays using parallel processing"""
     if max_workers is None:
-        # Use fewer workers for overlay (more memory intensive)
-        max_workers = min(2, multiprocessing.cpu_count())
+        # Use up to 50% of CPU count for overlays (memory intensive)
+        max_workers = max(2, int(multiprocessing.cpu_count() * 0.5))
 
     print(f"[performance] Rendering {len(intervals)} overlays using {max_workers} parallel workers")
 
