@@ -1,234 +1,266 @@
-# Video-Highlights
+# Video Highlights
 
-A no-subscription, local Python pipeline for generating soccer highlight reels from game footage.
+Video Highlights is a soccer video analysis platform that converts full-match recordings into events, player spotlights, team analytics, and shareable highlight packages.
 
-## Features
+## Project Status
 
-- **Player Tracking**: Uses YOLO + ByteTrack to track all players
-- **Smart Player Selection**: Lock onto your player with interactive box selection or auto-detect longest-playing player
-- **Intelligent Highlight Detection**: Finds exciting moments using multi-factor analysis:
-  - **Speed/acceleration spikes** from player movement
-  - **Ball proximity tracking** - detects when player is near the ball
-  - **Direction changes** - identifies cuts, turns, and sudden movements
-  - **Audio peaks** (crowd reactions, whistles, etc.)
-  - **Configurable sensitivity** - tune detection thresholds to your needs
-- **Video Trimming**: Process only specific portions of long game videos
-- **Clean Output**: Exports highlight clips and optional spotlight overlay versions
-- **GUI & Command Line**: Choose between a user-friendly GUI or powerful command-line interface
+This repository now provides a local Python pipeline plus a web/API foundation with multitenant controls:
 
-## Installation
+1. CLI pipeline: `VideoHighlights.py`
+2. Desktop UI: `VideoHighlightsGUI.py`
+3. Streamlit UI: `app.py`
+4. FastAPI backend: `backend/main.py`
+5. API operator UI: `app_api.py`
+6. Global admin portal: `app_admin_global.py`
+7. Tenant admin portal: `app_admin_tenant.py`
+
+The planned direction is a web/cloud architecture with Dockerized workers and optional GPU acceleration.
+
+## Target Architecture (Planned)
+
+1. Web app for upload, review, annotation, and export
+2. API for users, teams, projects, jobs, and outputs
+3. Queue and scheduler for asynchronous processing
+4. GPU analysis workers for tracking, event detection, and player analytics
+5. Rendering workers for clips, overlays, and montages
+6. Object storage, relational database, and observability stack
+
+## Product Capability Targets
+
+1. Follow-cam generation from panoramic match recordings
+2. Automated soccer event timeline detection
+3. Player spotlight reels and jersey-assisted identity workflows
+4. Team momentum graph, heatmaps, and position summaries
+5. Timeline editor with annotation and sharing tools
+6. Live streaming and instant replay markers (phase-gated)
+7. Data trust workflows (confidence calibration and human review queues)
+8. Season intelligence and opponent scouting automation
+9. Coaching action plans, recruiting workflows, and distribution tooling
+10. Open APIs, integrations, and edge/fleet operational visibility
+11. AI copilot workflows via LLM API integration for query, explainability, and review assistance
+12. Feedback-driven continuous learning loop for improving event quality over time
+
+## Quick Start (Current Local Pipeline)
 
 ### Prerequisites
 
-- Python 3.8 or higher
-- FFmpeg (for video processing)
+- Python 3.10+
+- FFmpeg in PATH
+- Optional: NVIDIA GPU + CUDA drivers
 
-### Quick Start with Auto-Install
-
-The easiest way to get started is to use the provided launcher scripts, which will automatically check for and install dependencies:
-
-**Windows:**
-```bash
-run_gui.bat
-```
-
-**Linux/Mac:**
-```bash
-chmod +x run_gui.sh
-./run_gui.sh
-```
-
-These launchers will:
-- Check if Python is installed
-- Detect missing dependencies and offer to install them
-- Optionally install GPU acceleration (PyTorch with CUDA)
-- Launch the GUI once everything is ready
-
-### Manual Install Dependencies
-
-If you prefer to install dependencies manually:
+### Install
 
 ```bash
+python -m venv .venv
+.\.venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### Optional: GPU Acceleration (2-3x faster)
-
-For significantly faster processing with NVIDIA GPUs:
+### Run CLI
 
 ```bash
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+python VideoHighlights.py --video path/to/match.mp4 --out ./highlights_output
 ```
 
-**Requirements:**
-- NVIDIA GPU with CUDA support
-- CUDA drivers installed (verify with `nvidia-smi`)
-- 4GB+ VRAM recommended
-
-## Usage
-
-### Option 1: Web Interface (Recommended)
-
-Launch the web-based interface in your browser:
+### Run Web UI (Streamlit)
 
 ```bash
 streamlit run app.py
 ```
 
-Or use the launcher:
+### Run API Client UI (Streamlit)
+
 ```bash
-./run_web.sh
+streamlit run app_api.py
 ```
 
-The web interface offers:
-- 🌐 Works in any browser (no desktop required)
-- 📤 Upload videos directly from your computer
-- ⚙️ Interactive configuration with sliders and checkboxes
-- 📊 Real-time progress tracking
-- ⬇️ Download individual clips or full montage
-- 📱 Mobile-friendly responsive design
-- 💡 Built-in help and tips
+### Run Global Admin Portal (Streamlit)
 
-### Option 2: Desktop GUI
-
-Launch the graphical interface (requires display):
-
-**Windows:**
 ```bash
-run_gui.bat
+streamlit run app_admin_global.py
 ```
 
-**Linux/Mac:**
+### Run Tenant Admin Portal (Streamlit)
+
 ```bash
-./run_gui.sh
+streamlit run app_admin_tenant.py
 ```
 
-**Or manually:**
+### Run V1 API
+
+```bash
+python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+Or use launcher scripts:
+
+```bash
+run_api.bat
+```
+
+```bash
+./run_api.sh
+```
+
+### Run Queue Worker (Optional Queue Mode)
+
+Set API execution mode to queue:
+
+```bash
+set VH_JOB_EXECUTION_MODE=queue
+```
+
+Start API and worker separately:
+
+```bash
+run_api.bat
+```
+
+```bash
+run_worker.bat
+```
+
+Validation:
+
+```bash
+python test_api_smoke.py
+python test_api_auth_queue.py
+python -m pytest --cov=backend --cov-report=term-missing
+```
+
+or:
+
+```bash
+run_tests.bat
+```
+
+### Auth and Roles (Configurable)
+
+Default mode is open dev access (`VH_AUTH_REQUIRED=false`).
+
+To require bearer tokens:
+
+```bash
+set VH_AUTH_REQUIRED=true
+set VH_API_TOKENS=admin-token:admin,coach-token:coach,analyst-token:analyst,tenant-admin-token:tenant_admin
+```
+
+Then call APIs with:
+
+```bash
+Authorization: Bearer admin-token
+```
+
+JWT support is also available:
+
+1. Set `VH_JWT_SECRET` (required for JWT issue/verify)
+2. Optional: `VH_AUTH_BOOTSTRAP_KEY` for initial token bootstrap
+3. Issue JWT via `POST /v1/auth/token`
+4. Inspect current identity via `GET /v1/auth/me`
+5. Send `X-Tenant-Id` header (tenant id or slug) for tenant-scoped endpoints
+
+### Multi-tenant and Admin API
+
+Tenant-scoped APIs require tenant context. Use request header:
+
+```bash
+X-Tenant-Id: <tenant_id_or_slug>
+```
+
+Admin surfaces:
+
+1. Global admin API: `/v1/admin/global/*` (tenant, user, membership, inventory controls)
+2. Tenant admin API: `/v1/admin/tenant/*` (tenant-scoped users, memberships, summary)
+
+Portal launchers:
+
+```bash
+run_admin_global.bat
+run_admin_tenant.bat
+```
+
+### Storage Backend
+
+Default storage is local filesystem (`VH_STORAGE_BACKEND=local`).
+
+S3-compatible mode:
+
+```bash
+set VH_STORAGE_BACKEND=s3
+set VH_S3_BUCKET=video-highlights
+set VH_S3_ENDPOINT_URL=https://<s3-compatible-endpoint>
+set VH_S3_ACCESS_KEY_ID=<key>
+set VH_S3_SECRET_ACCESS_KEY=<secret>
+set VH_S3_REGION=<region>
+set VH_S3_KEY_PREFIX=video-highlights
+```
+
+Use `GET /v1/matches/{match_id}/assets/{asset_id}/download-url` to resolve local paths or signed URLs.
+
+### Run Desktop UI
+
 ```bash
 python VideoHighlightsGUI.py
 ```
 
-The desktop GUI provides:
-- **Hardware information display** - shows detected CPU and GPU at startup
-- Browse and select your video file
-- Set trim start/end times with easy time format (MM:SS or HH:MM:SS)
-- Configure all detection parameters
-- Choose output directory
-- Enable/disable options (player selection, overlay, audio detection)
-- **GPU requirement checkbox** - ensure GPU is available before processing
-- **GPU status indicator** - shows detected GPU or CPU mode
-- **Verbose logging option** - show detailed progress including frame processing stats
-- See real-time processing output
-- Get notified when complete
+## Docker and GPU Notes
 
-**Note:** Requires a graphical display. Use the web interface for remote/headless servers.
+Containerized GPU execution supports local PC hosts, NVIDIA-capable edge systems, and cloud GPU nodes when configured correctly.
 
-### Option 3: Command Line
+Required host setup:
 
-For power users and automation:
+1. NVIDIA drivers installed
+2. NVIDIA Container Toolkit installed
+3. CUDA-compatible runtime/image stack
+4. GPU worker run with `--gpus all`
 
-#### Basic usage
+Example:
+
 ```bash
-python VideoHighlights.py --video /path/to/match.mp4 --out ./highlights_out
+docker run --rm -it --gpus all your-image:gpu
 ```
 
-#### With player selection and overlay
+## Docker Desktop Launch (This Repo)
+
+1. Open Docker Desktop and confirm the engine is running.
+2. From repo root, launch core services:
+
 ```bash
-python VideoHighlights.py --video match.mp4 --select --overlay
+docker compose up --build api worker api-client admin-global admin-tenant
 ```
 
-#### Trim long video (2nd half only - 45 min to 90 min)
+3. Open apps:
+- API: `http://localhost:8000/docs`
+- API Client: `http://localhost:8501`
+- Global Admin Portal: `http://localhost:8502`
+- Tenant Admin Portal: `http://localhost:8503`
+
+Windows convenience:
+
 ```bash
-python VideoHighlights.py --video match.mp4 --trim-start 45:00 --trim-end 1:30:00
+run_docker.bat
 ```
 
-#### Interactive mode (prompts for all options)
+GPU worker profile (requires NVIDIA toolkit and Docker GPU support):
+
 ```bash
-python VideoHighlights.py
+docker compose --profile gpu up --build api worker-gpu api-client admin-global admin-tenant
 ```
 
-### Command-Line Options
+Windows convenience:
 
-- `--video` - Input video path
-- `--out` - Output directory for highlights
-- `--select` - Interactively select your player's box on first frame
-- `--trim-start` - Trim video start time (format: MM:SS or HH:MM:SS or seconds)
-- `--trim-end` - Trim video end time (format: MM:SS or HH:MM:SS or seconds)
-- `--pre` - Seconds before event (default: 2.0)
-- `--post` - Seconds after event (default: 6.0)
-- `--min-clip` - Minimum clip duration in seconds (default: 4.0)
-- `--speed-sensitivity` - Speed detection sensitivity, lower = more sensitive (default: 2.0, range: 0.5-5.0)
-- `--audio-sensitivity` - Audio detection sensitivity, lower = more sensitive (default: 2.0, range: 0.5-5.0)
-- `--overlay` - Render spotlight overlay clips (slower)
-- `--no-audio` - Disable audio-based peak detection
+```bash
+run_docker_gpu.bat
+```
 
-## How It Works
+## Documentation
 
-1. **Video Trimming** (Optional): Creates a working copy of the specified time range
-2. **Player & Ball Tracking**: YOLO detects all people and the ball, ByteTrack maintains consistent IDs across frames
-3. **Target Selection**: Either you select the player manually, or it picks the longest-lived track
-4. **Multi-Factor Highlight Detection**:
-   - **Speed Analysis**: Detects rapid player movement and acceleration
-   - **Ball Proximity**: Identifies when player is near the ball (within 200px for elevated views)
-   - **Direction Changes**: Catches sudden cuts, turns, and direction reversals
-   - **Audio Peaks**: Detects crowd reactions, whistles, and celebrations
-   - **Smart Scoring**: Combines all factors with configurable weights:
-     - Speed: 50% weight
-     - Ball proximity: 30% weight
-     - Direction changes: 20% weight
-   - Uses robust MAD (Median Absolute Deviation) threshold to adapt to each video
-   - Merges nearby events into coherent clips
-5. **Clip Generation**: Extracts highlight clips from the original video with proper timestamps
-6. **Montage Creation**: Combines all highlights into a single compilation video
-
-## Output
-
-The script generates:
-- Individual highlight clips: `highlight_01.mp4`, `highlight_02.mp4`, etc.
-- Combined montage: `highlights_montage.mp4`
-- Optional overlay versions with spotlight circle: `highlight_XX_spotlight.mp4`
-- Temporary trimmed video (if using trim feature): `trimmed_working_video.mp4`
-
-## Tips
-
-- **Player Selection**: Use `--select` if your player isn't on the field the whole game
-- **Long Videos**: Use `--trim-start` and `--trim-end` to process only relevant portions (saves time!)
-- **Video Quality**: Works best with 1080p/60fps or 4K/60fps from a stable, elevated sideline view
-- **Ball Detection**: Works best with clear ball visibility - elevated sideline views are ideal for kids' soccer
-- **Tuning Sensitivity**:
-  - Start with default `--speed-sensitivity 2.0`
-  - If you get too many false positives, increase to `2.5` or `3.0`
-  - If you're missing highlights, decrease to `1.5` or `1.0`
-  - Same applies for `--audio-sensitivity`
-- **First Run**: YOLO weights (~6MB) will auto-download on first use
-- **Processing Time**: Expect ~1-2 minutes per minute of video for tracking (varies by hardware)
-
-## Troubleshooting
-
-### No highlights found or too few highlights
-- **Lower sensitivity thresholds**: Use `--speed-sensitivity 1.5` and `--audio-sensitivity 1.5` for more sensitive detection (default is 2.0, old default was 3.0)
-- **Try even lower values**: For very conservative videos, try `--speed-sensitivity 1.0` to catch more moments
-- **Check debug output**: The script now shows detailed detection statistics - look for lines starting with `[debug]` to see threshold values and number of candidates found
-- Use `--select` to ensure the correct player is tracked
-- Check that video has visible player movement and the ball is detectable
-
-### Video file not found
-- Use absolute paths or ensure relative paths are correct
-- Check file extension is supported (.mp4, .mov, .avi, .mkv, .m4v)
-
-### Memory issues with long videos
-- Use the trim feature to process segments
-- Close other applications to free RAM
-- Consider processing in multiple passes
-
-## License
-
-See LICENSE file for details.
-
-## Credits
-
-Built with:
-- YOLOv8 (Ultralytics) for object detection
-- ByteTrack for multi-object tracking
-- MoviePy for video processing
-- Librosa for audio analysis
+1. `PRD.md`: Product requirements and acceptance criteria
+2. `ROADMAP.md`: Phase plan and milestone scope
+3. `REQUIREMENTS_TRACEABILITY.md`: Mapping of context-window requirements to PRD and roadmap
+4. `LOCAL_SETUP.md`: Local and Docker setup guidance
+5. `PERFORMANCE_IMPROVEMENTS.md`: Implemented optimizations in current code
+6. `PERFORMANCE_RECOMMENDATIONS.md`: Next optimization opportunities
+7. `FEEDBACK_EVENT_API_SCHEMA.md`: Concrete event/feedback payload schema and API endpoints
+8. `IMPLEMENTATION_STATUS.md`: Current build status and next autonomous implementation queue
+9. `TESTING.md`: Automated testing framework, local commands, and CI

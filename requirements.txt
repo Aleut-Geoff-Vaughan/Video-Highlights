@@ -26,3 +26,17 @@ psutil>=5.8.0
 # Optional: For better performance
 # torch>=2.0.0  # Uncomment if you want to use GPU acceleration with YOLO
 # torchvision>=0.15.0
+
+# Backend API (V1)
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+sqlmodel>=0.0.22
+openai>=1.30.0
+python-multipart>=0.0.9
+requests>=2.32.0
+
+# Testing framework
+pytest>=8.3.0
+pytest-cov>=6.0.0
+PyJWT>=2.9.0
+boto3>=1.36.0

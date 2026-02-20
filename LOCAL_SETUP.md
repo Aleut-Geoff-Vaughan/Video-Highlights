@@ -1,190 +1,273 @@
-# Local Setup Guide - GPU Acceleration
+# Local Setup
 
-This guide will help you run the Video Highlights generator on your local machine with NVIDIA GPU acceleration for significantly faster processing.
+This guide covers local development plus Docker execution on GPU-capable hosts.
 
-## Prerequisites
+Supported deployment styles:
 
-1. **NVIDIA GPU** - Compatible NVIDIA GPU (GTX 10-series or newer recommended)
-2. **NVIDIA Drivers** - Latest NVIDIA drivers installed ([Download here](https://www.nvidia.com/Download/index.aspx))
-3. **Python 3.8+** - Python 3.8 or higher
-4. **Git** - For cloning the repository
+1. Local PC host (Windows + WSL2, or Linux)
+2. NVIDIA-capable edge/workstation hosts (for example, NVIDIA-enabled appliance or server)
+3. Cloud VM/container hosts with NVIDIA GPU support
 
-## Step 1: Clone the Repository
+## 1. Prerequisites
 
-```bash
-git clone <your-repo-url>
-cd Video-Highlights
-```
+- Docker Desktop (Windows) or Docker Engine (Linux)
+- Python 3.10+ for non-container runs
+- FFmpeg available for local non-container runs
+- Optional but recommended: NVIDIA GPU
 
-## Step 2: Create Virtual Environment
+For GPU containers:
 
-### Windows:
-```bash
-python -m venv venv
-venv\Scripts\activate
-```
+- Latest NVIDIA driver installed on host
+- NVIDIA Container Toolkit configured on host runtime
 
-### macOS/Linux:
-```bash
-python3 -m venv venv
-source venv/bin/activate
-```
-
-## Step 3: Install CUDA Toolkit (if not already installed)
-
-Download and install CUDA Toolkit 12.x from:
-https://developer.nvidia.com/cuda-downloads
-
-**Verify CUDA installation:**
-```bash
-nvcc --version
-```
-
-## Step 4: Install PyTorch with CUDA Support
+## 2. Python Environment (Non-Docker)
 
 ```bash
-# For CUDA 12.x (most modern GPUs)
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-
-# For CUDA 11.x (older GPUs)
-# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-```
-
-**Verify PyTorch can see your GPU:**
-```bash
-python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}'); print(f'GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"None\"}')"
-```
-
-Expected output:
-```
-CUDA available: True
-GPU: NVIDIA GeForce RTX 3080 (or your GPU model)
-```
-
-## Step 5: Install Other Dependencies
-
-```bash
+python -m venv .venv
+.\.venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-## Step 6: Verify GPU Acceleration
+Run locally:
+
+```bash
+python VideoHighlights.py --video path/to/match.mp4 --out ./highlights_output
+```
+
+Run API locally:
+
+```bash
+python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+If you are upgrading from an older local DB schema, reset the SQLite file first:
+
+```bash
+del video_highlights_v1.db
+rm -f video_highlights_v1.db
+```
+
+Optional API client UI:
+
+```bash
+streamlit run app_api.py
+```
+
+Global admin portal UI:
+
+```bash
+streamlit run app_admin_global.py
+```
+
+Tenant admin portal UI:
+
+```bash
+streamlit run app_admin_tenant.py
+```
+
+Queue mode (API + worker split):
+
+```bash
+set VH_JOB_EXECUTION_MODE=queue
+python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+In a second terminal:
+
+```bash
+python -m backend.worker
+```
+
+Run API smoke test:
+
+```bash
+python test_api_smoke.py
+```
+
+Run auth + queue smoke test:
+
+```bash
+python test_api_auth_queue.py
+```
+
+Run full automated test suite:
+
+```bash
+python -m pytest --cov=backend --cov-report=term-missing
+```
+
+or:
+
+```bash
+run_tests.bat
+```
+
+Optional auth lock-down:
+
+```bash
+set VH_AUTH_REQUIRED=true
+set VH_API_TOKENS=admin-token:admin,coach-token:coach,analyst-token:analyst,tenant-admin-token:tenant_admin
+```
+
+JWT auth mode:
+
+```bash
+set VH_JWT_SECRET=replace-with-strong-secret
+set VH_JWT_ISSUER=video-highlights
+set VH_JWT_DEFAULT_EXP_MINUTES=120
+```
+
+Optional bootstrap token issuing:
+
+```bash
+set VH_AUTH_BOOTSTRAP_KEY=bootstrap-secret
+```
+
+Issue JWT token (once API is running):
+
+```bash
+curl -X POST http://localhost:8000/v1/auth/token ^
+  -H "Authorization: Bearer admin-token" ^
+  -H "Content-Type: application/json" ^
+  -d "{\"user_id\":\"coach_1\",\"role\":\"coach\",\"tenant_id\":\"default\",\"expires_in_minutes\":120}"
+```
+
+Tenant-scoped API requests:
+
+```bash
+curl -X GET http://localhost:8000/v1/matches ^
+  -H "Authorization: Bearer coach-token" ^
+  -H "X-Tenant-Id: default"
+```
+
+Global admin API examples:
+
+```bash
+curl -X GET http://localhost:8000/v1/admin/global/summary ^
+  -H "Authorization: Bearer admin-token"
+```
+
+```bash
+curl -X POST http://localhost:8000/v1/admin/global/tenants ^
+  -H "Authorization: Bearer admin-token" ^
+  -H "Content-Type: application/json" ^
+  -d "{\"slug\":\"club-a\",\"name\":\"Club A\",\"status\":\"active\",\"metadata\":{}}"
+```
+
+Tenant admin API example:
+
+```bash
+curl -X GET http://localhost:8000/v1/admin/tenant/summary ^
+  -H "Authorization: Bearer tenant-admin-token" ^
+  -H "X-Tenant-Id: club-a"
+```
+
+S3-compatible storage mode:
+
+```bash
+set VH_STORAGE_BACKEND=s3
+set VH_S3_BUCKET=video-highlights
+set VH_S3_ENDPOINT_URL=https://<s3-endpoint>
+set VH_S3_ACCESS_KEY_ID=<key>
+set VH_S3_SECRET_ACCESS_KEY=<secret>
+set VH_S3_REGION=<region>
+set VH_S3_KEY_PREFIX=video-highlights
+```
+
+## 3. GPU Verification
+
+Host checks:
 
 ```bash
 nvidia-smi
+python -c "import torch; print(torch.cuda.is_available())"
 ```
 
-This should show your GPU and its current usage.
+Expected result: CUDA availability is `True` when GPU-enabled torch/runtime is installed.
 
-## Running with GPU
+## 4. Docker Execution
 
-### Basic Usage:
-```bash
-python VideoHighlights_manual.py --video path/to/your/video.mp4 --out ./output --box x,y,w,h
-```
+Docker assets are now included in repo:
 
-### With Overlay (Slower):
-```bash
-python VideoHighlights_manual.py --video path/to/your/video.mp4 --out ./output --box x,y,w,h --overlay
-```
+- `Dockerfile`
+- `docker-compose.yml`
 
-### Full Options:
-```bash
-python VideoHighlights_manual.py \
-    --video path/to/your/video.mp4 \
-    --out ./output \
-    --box 615,470,40,80 \
-    --pre 2.0 \
-    --post 6.0 \
-    --overlay
-```
-
-## Performance Expectations
-
-### With NVIDIA GPU:
-- **RTX 3080/3090**: ~2-3x faster than CPU (15-20 minutes for 10-minute video)
-- **RTX 4080/4090**: ~3-4x faster than CPU (10-15 minutes for 10-minute video)
-- **GTX 1080 Ti**: ~1.5-2x faster than CPU (20-25 minutes for 10-minute video)
-
-### Processing Steps:
-1. **Player Tracking** (slowest) - YOLO + ByteTrack - GPU helps most here
-2. **Speed Analysis** (fast) - CPU-based calculations
-3. **Audio Detection** (medium) - CPU-based audio analysis
-4. **Clip Writing** (medium) - Video encoding
-5. **Overlay Rendering** (slow if enabled) - Frame-by-frame processing
-
-## Troubleshooting
-
-### GPU Not Detected
-
-If the script shows "Using device: cpu" instead of "cuda":
-
-1. **Check CUDA Installation:**
-   ```bash
-   python -c "import torch; print(torch.version.cuda)"
-   ```
-
-2. **Reinstall PyTorch with CUDA:**
-   ```bash
-   pip uninstall torch torchvision torchaudio
-   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-   ```
-
-3. **Update NVIDIA Drivers:**
-   - Download latest from https://www.nvidia.com/Download/index.aspx
-
-### Out of Memory Errors
-
-If you get CUDA out of memory errors:
-
-1. Close other GPU-intensive applications
-2. Use a smaller batch size (the script already uses optimal settings)
-3. Process shorter video segments using `--trim-start` and `--trim-end`
-
-### Example - Process only second half:
-```bash
-python VideoHighlights_manual.py \
-    --video video.mp4 \
-    --out ./output \
-    --box 615,470,40,80 \
-    --trim-start 45:00 \
-    --trim-end 1:30:00
-```
-
-## Logs
-
-All runs create timestamped log files in the `logs/` directory:
-- Format: `logs/run_YYYYMMDD_HHMMSS.log`
-- Contains full output including performance metrics and any errors
-
-## Getting Player Coordinates
-
-If you need to find the player coordinates (x, y, width, height):
-
-1. **Extract first frame:**
-   ```bash
-   python -c "import cv2; cap = cv2.VideoCapture('video.mp4'); ret, frame = cap.read(); cv2.imwrite('first_frame.jpg', frame)"
-   ```
-
-2. **Open in image viewer** and note the approximate pixel coordinates of the player
-   - x, y = top-left corner of box around player
-   - w, h = width and height of box (typically 40-60 pixels wide, 80-120 tall)
-
-3. **Or use the GUI version** on your local machine:
-   ```bash
-   python VideoHighlights.py --video video.mp4 --select --out ./output
-   ```
-   This will let you draw a box interactively.
-
-## Alternative: Run Original Script with Interactive Selection
-
-If you prefer the interactive selection (requires display):
+### CPU Container
 
 ```bash
-python VideoHighlights.py --video video.mp4 --select --out ./output --overlay
+docker run --rm -it \
+  -v ${PWD}:/workspace \
+  your-image:cpu \
+  python VideoHighlights.py --video /workspace/input.mp4 --out /workspace/output
 ```
 
-This will open a window where you can draw a box around your player.
+### GPU Container
 
-## Support
+```bash
+docker run --rm -it --gpus all \
+  -v ${PWD}:/workspace \
+  your-image:gpu \
+  python VideoHighlights.py --video /workspace/input.mp4 --out /workspace/output
+```
 
-For issues or questions, please check the main README.md or create an issue on GitHub.
+### Docker Desktop (Recommended for This Project)
+
+Start API, queue worker, API client portal, global admin portal, and tenant admin portal:
+
+```bash
+docker compose up --build api worker api-client admin-global admin-tenant
+```
+
+Endpoints:
+
+1. API docs: `http://localhost:8000/docs`
+2. API client: `http://localhost:8501`
+3. Global admin portal: `http://localhost:8502`
+4. Tenant admin portal: `http://localhost:8503`
+
+Windows helper script:
+
+```bash
+run_docker.bat
+```
+
+GPU worker profile:
+
+```bash
+docker compose --profile gpu up --build api worker-gpu api-client admin-global admin-tenant
+```
+
+Windows helper script:
+
+```bash
+run_docker_gpu.bat
+```
+
+## 5. Recommended Container Topology
+
+1. `web` (CPU)
+2. `api` (CPU)
+3. `worker-analysis-gpu` (GPU required)
+4. `worker-render` (CPU or GPU optional)
+
+Only schedule `worker-analysis-gpu` to GPU nodes.
+
+## 6. Common Issues
+
+### GPU not visible inside container
+
+1. Confirm `nvidia-smi` works on host
+2. Confirm NVIDIA Container Toolkit is installed
+3. Run container with `--gpus all`
+4. Verify image includes CUDA-compatible runtime and torch build
+
+### FFmpeg codec errors
+
+1. Ensure ffmpeg is installed in the image
+2. Confirm required encoders are available (`libx264`, optional `h264_nvenc`)
+
+### Slow output generation
+
+1. Prefer SSD/NVMe output storage
+2. Lower thread count on low-memory systems (`--threads 2`)
+3. Disable overlay when collecting baseline performance data

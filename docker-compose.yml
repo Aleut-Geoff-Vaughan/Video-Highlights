@@ -1,0 +1,98 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vh-api
+    command: python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
+    environment:
+      VH_DB_URL: sqlite:///./video_highlights_v1.db
+      VH_JOB_EXECUTION_MODE: queue
+      VH_OUTPUT_ROOT: ./outputs
+      VH_LOCAL_STORAGE_ROOT: ./storage
+      VH_AUTH_REQUIRED: "false"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./:/app
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vh-worker
+    command: python -m backend.worker
+    environment:
+      VH_DB_URL: sqlite:///./video_highlights_v1.db
+      VH_JOB_EXECUTION_MODE: queue
+      VH_OUTPUT_ROOT: ./outputs
+      VH_LOCAL_STORAGE_ROOT: ./storage
+      VH_AUTH_REQUIRED: "false"
+    depends_on:
+      - api
+    volumes:
+      - ./:/app
+
+  api-client:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vh-api-client
+    command: streamlit run app_api.py --server.address=0.0.0.0 --server.port=8501
+    environment:
+      STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
+    ports:
+      - "8501:8501"
+    depends_on:
+      - api
+    volumes:
+      - ./:/app
+
+  admin-global:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vh-admin-global
+    command: streamlit run app_admin_global.py --server.address=0.0.0.0 --server.port=8502
+    environment:
+      STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
+    ports:
+      - "8502:8502"
+    depends_on:
+      - api
+    volumes:
+      - ./:/app
+
+  admin-tenant:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vh-admin-tenant
+    command: streamlit run app_admin_tenant.py --server.address=0.0.0.0 --server.port=8503
+    environment:
+      STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
+    ports:
+      - "8503:8503"
+    depends_on:
+      - api
+    volumes:
+      - ./:/app
+
+  worker-gpu:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vh-worker-gpu
+    command: python -m backend.worker
+    environment:
+      VH_DB_URL: sqlite:///./video_highlights_v1.db
+      VH_JOB_EXECUTION_MODE: queue
+      VH_OUTPUT_ROOT: ./outputs
+      VH_LOCAL_STORAGE_ROOT: ./storage
+      VH_AUTH_REQUIRED: "false"
+    profiles: ["gpu"]
+    depends_on:
+      - api
+    volumes:
+      - ./:/app
+    gpus: all
