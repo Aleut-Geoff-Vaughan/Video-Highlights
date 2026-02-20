@@ -23,6 +23,7 @@ This document defines concrete payloads and endpoints for event storage, reviewe
 - `goal_kick`
 - `kickoff`
 - `foul`
+- `save`
 
 ### 2.2 Event Status
 
@@ -235,6 +236,7 @@ This document defines concrete payloads and endpoints for event storage, reviewe
 Query params:
 
 - `event_type`
+- `job_id`
 - `status`
 - `team_id`
 - `player_id`
@@ -290,6 +292,85 @@ Request body example:
   "team_id": "team_home",
   "player_id": "player_123",
   "jersey_number": "10"
+}
+```
+
+### 5.5 Render Event Clip On Demand
+
+`POST /v1/matches/{match_id}/events/{event_id}/clip-on-demand`
+
+Request body:
+
+```json
+{
+  "pre_seconds": 1.5,
+  "post_seconds": 5.0,
+  "anchor": "event_window",
+  "include_audio": true,
+  "prefer_gpu": true,
+  "force_rebuild": false,
+  "expires_seconds": 3600
+}
+```
+
+### 5.6 Export Selected Highlights
+
+`POST /v1/matches/{match_id}/exports/highlights`
+
+Request body:
+
+```json
+{
+  "event_ids": ["evt_01J...", "evt_01K..."],
+  "pre_seconds": 1.0,
+  "post_seconds": 3.0,
+  "anchor": "event_window",
+  "include_audio": true,
+  "prefer_gpu": true,
+  "title": "Selected Highlights",
+  "expires_seconds": 3600
+}
+```
+
+Response `200`:
+
+```json
+{
+  "export_id": "export_01J...",
+  "match_id": "match_01J...",
+  "event_ids": ["evt_01J...", "evt_01K..."],
+  "clip_count": 2,
+  "asset_id": "asset_01J...",
+  "path": "/app/storage/match_.../asset_..._export.mp4",
+  "download_url": "/app/storage/match_.../asset_..._export.mp4",
+  "duration_ms": 12600,
+  "created_at": "2026-02-20T16:00:00Z"
+}
+```
+
+Behavior:
+
+1. Computes clip window from event timestamps.
+2. Renders frame-accurate clip from source video.
+3. Stores clip as a match asset and caches signature for reuse.
+4. Returns playback path/download URL.
+
+Response `200`:
+
+```json
+{
+  "clip_id": "eclip_01J...",
+  "match_id": "match_01J...",
+  "event_id": "evt_01J...",
+  "asset_id": "asset_01J...",
+  "path": "/app/storage/match_.../asset_..._evt_...mp4",
+  "download_url": "/app/storage/match_.../asset_..._evt_...mp4",
+  "start_ms": 18900,
+  "end_ms": 27500,
+  "duration_ms": 8600,
+  "include_audio": true,
+  "anchor": "event_window",
+  "reused_existing": false
 }
 ```
 
@@ -685,3 +766,74 @@ Response `200`:
 - `PATCH /v1/admin/tenant/users/{user_id}`
 - `PATCH /v1/admin/tenant/memberships/{membership_id}`
 - `GET /v1/admin/tenant/matches`
+
+## 13. Job Debug Logging Endpoints
+
+### 13.1 List Job Logs
+
+`GET /v1/jobs/{job_id}/logs`
+
+Query params:
+
+- `level` (`debug|info|warning|error`)
+- `stage` (string)
+- `detail_level` (`basic|detailed|extreme`)
+- `limit` (default 200, max 5000)
+
+### 13.2 List Job Bookmarks
+
+`GET /v1/jobs/{job_id}/bookmarks`
+
+Behavior:
+
+1. Returns run bookmarks from `events` when events are already persisted.
+2. Falls back to `job.result.bookmarks`.
+3. Falls back to live `analysis_bookmarks.json` while processing is still running.
+
+Query params:
+
+- `limit` (default 2000, max 10000)
+
+### 13.3 Kill Job Session (Testing Utility)
+
+`POST /v1/jobs/{job_id}/kill-session`
+
+Behavior:
+
+1. Marks `cancel_requested=true`.
+2. Immediately cancels queued/claimed jobs.
+3. Marks running jobs as `cancel_requested` and finalizes cancel at safe checkpoints.
+
+### 13.4 Rerun Job (Model/Config Refresh)
+
+`POST /v1/jobs/{job_id}/rerun`
+
+Request body:
+
+```json
+{
+  "config_overrides": {
+    "model_version": "event-v1",
+    "focus_event_types": ["goal", "corner_kick"],
+    "analysis_only": true
+  },
+  "reason": "model-upgrade"
+}
+```
+
+Behavior:
+
+1. Clones the source job configuration.
+2. Applies `config_overrides`.
+3. Queues a new processing job for the same match.
+
+### 13.5 Delete Job (Run Cleanup)
+
+`DELETE /v1/jobs/{job_id}`
+
+Behavior:
+
+1. Deletes the selected run record (non-running jobs only).
+2. Deletes job logs linked to that run.
+3. Deletes run-linked events.
+4. Refreshes match processing metadata pointers.

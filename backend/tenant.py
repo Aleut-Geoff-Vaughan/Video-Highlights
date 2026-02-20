@@ -7,6 +7,7 @@ from fastapi import Depends, Header, HTTPException
 from sqlmodel import Session, select
 
 from .auth import UserContext, get_current_user
+from .config import settings
 from .database import get_session
 from .models import Tenant, TenantMembership, UserAccount
 from .utils import utcnow
@@ -36,6 +37,27 @@ def ensure_default_tenant(session: Session) -> Tenant:
     session.commit()
     session.refresh(tenant)
     return tenant
+
+
+def ensure_base_tenant(session: Session) -> Tenant:
+    slug = (settings.base_tenant_slug or "sandbox").strip().lower()
+    name = (settings.base_tenant_name or "Sandbox Tenant").strip() or "Sandbox Tenant"
+
+    tenant = session.exec(select(Tenant).where(Tenant.slug == slug)).first()
+    if tenant:
+        return tenant
+
+    tenant = Tenant(slug=slug, name=name, status="active")
+    session.add(tenant)
+    session.commit()
+    session.refresh(tenant)
+    return tenant
+
+
+def ensure_seed_tenants(session: Session) -> tuple[Tenant, Tenant]:
+    default_tenant = ensure_default_tenant(session)
+    base_tenant = ensure_base_tenant(session)
+    return default_tenant, base_tenant
 
 
 def _find_tenant(session: Session, tenant_ref: Optional[str]) -> Optional[Tenant]:
@@ -82,7 +104,7 @@ def get_tenant_context(
     session: Session = Depends(get_session),
     user: UserContext = Depends(get_current_user),
 ) -> TenantContext:
-    default_tenant = ensure_default_tenant(session)
+    default_tenant, base_tenant = ensure_seed_tenants(session)
     user.is_global_admin = user.is_global_admin or user.role == "system"
     account = ensure_user_account(session, user)
     user.is_global_admin = user.is_global_admin or account.is_global_admin
@@ -106,19 +128,20 @@ def get_tenant_context(
                 detail="Multiple tenant memberships found. Provide X-Tenant-ID header.",
             )
         else:
-            tenant = default_tenant
+            tenant = base_tenant if settings.skip_user_management else default_tenant
 
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
 
     membership = membership_by_tenant.get(tenant.id)
     if not membership and not user.is_global_admin:
+        auto_provision_enabled = settings.skip_user_management
         # Default bootstrap path for first-time users in development mode.
-        if tenant.id == default_tenant.id:
+        if tenant.id == default_tenant.id or auto_provision_enabled:
             membership = TenantMembership(
                 tenant_id=tenant.id,
                 user_id=account.id,
-                role="tenant_admin" if user.role in {"admin", "system"} else user.role,
+                role="tenant_admin" if user.role in {"admin", "system", "tenant_admin"} else user.role,
                 status="active",
             )
             session.add(membership)

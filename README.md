@@ -8,7 +8,7 @@ This repository now provides a local Python pipeline plus a web/API foundation w
 
 1. CLI pipeline: `VideoHighlights.py`
 2. Desktop UI: `VideoHighlightsGUI.py`
-3. Streamlit UI: `app.py`
+3. Streamlit processing portal UI: `app.py`
 4. FastAPI backend: `backend/main.py`
 5. API operator UI: `app_api.py`
 6. Global admin portal: `app_admin_global.py`
@@ -62,7 +62,7 @@ pip install -r requirements.txt
 python VideoHighlights.py --video path/to/match.mp4 --out ./highlights_output
 ```
 
-### Run Web UI (Streamlit)
+### Run Processing Portal (Streamlit)
 
 ```bash
 streamlit run app.py
@@ -172,6 +172,52 @@ Admin surfaces:
 1. Global admin API: `/v1/admin/global/*` (tenant, user, membership, inventory controls)
 2. Tenant admin API: `/v1/admin/tenant/*` (tenant-scoped users, memberships, summary)
 
+Quick dev mode to test core flows without managing users:
+
+```bash
+set VH_SKIP_USER_MANAGEMENT=true
+set VH_BASE_TENANT_SLUG=sandbox
+set VH_BASE_TENANT_NAME=Sandbox Tenant
+```
+
+With this enabled, tenant membership is auto-provisioned on first use for the selected tenant.
+
+Test/Debug logging mode:
+
+```bash
+set VH_TEST_MODE=true
+set VH_LOG_LEVEL=DEBUG
+set VH_JOB_LOG_DETAIL=extreme
+```
+
+Job-level debug endpoints:
+
+1. `GET /v1/jobs/{job_id}/logs` (supports `level`, `stage`, `detail_level`, `limit`)
+2. `GET /v1/jobs/{job_id}/bookmarks` (live bookmark table from events/job result/manifest)
+3. `POST /v1/jobs/{job_id}/kill-session` (fast cancel path for testing)
+4. `POST /v1/jobs/{job_id}/rerun` (rerun with optional config/model/event-target overrides)
+5. `GET /v1/matches/{match_id}/events?job_id=<job_id>` (bookmark/event table for a specific processing run)
+6. `POST /v1/matches/{match_id}/events/{event_id}/clip-on-demand` (frame-accurate bookmark clip rendering with cache reuse)
+7. `DELETE /v1/jobs/{job_id}` (delete old run, including job logs and job-linked events)
+8. `POST /v1/matches/{match_id}/exports/highlights` (export one highlight reel from selected bookmarks/events)
+
+Codec fallback behavior:
+
+1. Clip export attempts `h264_nvenc` first when available.
+2. If NVENC fails at runtime, export auto-falls back to `libx264`, then `mpeg4`.
+
+Analysis-only mode and bookmark outputs:
+
+1. Set job config `"analysis_only": true` to skip clip rendering and generate fast event/bookmark analysis only.
+2. Every run writes `analysis_bookmarks.json` and `analysis_bookmarks.csv` to the job output directory.
+3. Completed jobs persist bookmark data in job result payload and auto-create `Event` rows linked to the job.
+4. Processing Portal Game Library includes full-match playback with bookmark jump controls.
+5. Bookmark rows can render frame-accurate on-demand clips without reprocessing the full match.
+6. Operations Console includes bulk queue controls to kill queued/active jobs for a selected match.
+7. Game Library includes a Match Workspace for one-click reprocess (latest config) and custom reprocess (same uploaded source video).
+8. Processing Portal supports an Experience toggle (`User Friendly` / `Technical`) for non-technical vs advanced workflows.
+9. Match Studio supports deleting old runs per match and exporting selected bookmarks into a final highlight reel.
+
 Portal launchers:
 
 ```bash
@@ -226,12 +272,13 @@ docker run --rm -it --gpus all your-image:gpu
 2. From repo root, launch core services:
 
 ```bash
-docker compose up --build api worker api-client admin-global admin-tenant
+docker compose up --build api worker api-client processing-ui admin-global admin-tenant
 ```
 
 3. Open apps:
 - API: `http://localhost:8000/docs`
 - API Client: `http://localhost:8501`
+- Processing Portal (dashboard + runs): `http://localhost:8504`
 - Global Admin Portal: `http://localhost:8502`
 - Tenant Admin Portal: `http://localhost:8503`
 
@@ -241,10 +288,16 @@ Windows convenience:
 run_docker.bat
 ```
 
+Stop all containers quickly:
+
+```bash
+stop_docker.bat
+```
+
 GPU worker profile (requires NVIDIA toolkit and Docker GPU support):
 
 ```bash
-docker compose --profile gpu up --build api worker-gpu api-client admin-global admin-tenant
+docker compose --profile gpu up --build api worker-gpu api-client processing-ui admin-global admin-tenant
 ```
 
 Windows convenience:

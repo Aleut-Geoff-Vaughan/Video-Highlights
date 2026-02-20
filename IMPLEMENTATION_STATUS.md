@@ -31,6 +31,23 @@ This file tracks concrete implementation progress against the documented V1 arch
 4. Added queue execution mode (`VH_JOB_EXECUTION_MODE=queue`) plus dedicated worker loop (`backend/worker.py`).
 5. Added worker trigger endpoint for controlled processing (`POST /v1/jobs/worker/run-once`).
 6. Added job retry endpoint (`POST /v1/jobs/{job_id}/retry`).
+7. Added job debug logging store (`job_logs`) with detail levels (`basic`, `detailed`, `extreme`).
+8. Added job log endpoint (`GET /v1/jobs/{job_id}/logs`) and fast test cancel endpoint (`POST /v1/jobs/{job_id}/kill-session`).
+9. Added `cancel_requested` lifecycle handling for easier test-session shutdown behavior.
+10. Added job rerun endpoint with config override support (`POST /v1/jobs/{job_id}/rerun`).
+11. Added match-level processing mechanics history persistence (`metadata.processing_history`).
+12. Added runtime codec fallback for clip export (`h264_nvenc` -> `libx264` -> `mpeg4`) to avoid NVENC export failures.
+13. Added analysis-only processing mode (`analysis_only`) for fast detection/bookmark-only runs.
+14. Added analysis bookmark artifacts (`analysis_bookmarks.json`, `analysis_bookmarks.csv`) generated for every run.
+15. Added job-run bookmark ingestion into `Event` rows for review/feedback workflows.
+16. Added event list filter by processing job (`GET /v1/matches/{match_id}/events?job_id=...`).
+17. Expanded processing portal game library with full-match playback and bookmark jump controls.
+18. Added frame-accurate clip-on-demand endpoint for event bookmarks with storage-backed caching (`POST /v1/matches/{match_id}/events/{event_id}/clip-on-demand`).
+19. Added portal UI controls to render/play bookmark clips without full job reprocessing.
+20. Added job bookmark feed endpoint (`GET /v1/jobs/{job_id}/bookmarks`) for live UI updates while runs are active.
+21. Added run deletion endpoint (`DELETE /v1/jobs/{job_id}`) with linked job-log and event cleanup.
+22. Added selected-bookmark highlight export endpoint (`POST /v1/matches/{match_id}/exports/highlights`).
+23. Added user-friendly experience mode with top-level workflow nav and match-centered run management.
 
 ## LLM + feedback loop scaffolding
 
@@ -62,6 +79,8 @@ This file tracks concrete implementation progress against the documented V1 arch
 12. Added dedicated global and tenant admin Streamlit portals (`app_admin_global.py`, `app_admin_tenant.py`).
 13. Added launch scripts for admin portals (`run_admin_global.*`, `run_admin_tenant.*`).
 14. Added multitenant isolation and admin API integration tests.
+15. Added debug/test run scripts for quick Docker shutdown (`stop_docker.bat`, `stop_docker.sh`).
+16. Rebuilt `app.py` into a SaaS-style processing portal with dashboards, announcements, game library, rerun flows, and operations console.
 
 ## Validated
 
@@ -69,7 +88,7 @@ This file tracks concrete implementation progress against the documented V1 arch
 2. `python test_api_smoke.py` passes end-to-end for core API flow.
 3. `python test_api_auth_queue.py` passes for auth-required + queue-worker execution mode.
 4. `python -m pytest --cov=backend --cov-report=term-missing` passes locally.
-5. Current automated test suite: 23 passing tests, backend coverage at 76%.
+5. Current automated test suite: 33 passing tests, backend coverage at 77%.
 6. Multitenant + admin test paths pass in local pytest run.
 
 ## Next Implementation Batch (Autonomous Queue)

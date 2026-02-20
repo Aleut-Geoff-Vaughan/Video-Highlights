@@ -23,6 +23,13 @@ def isolated_db(tmp_path: Path) -> Generator[str, None, None]:
 def client(isolated_db: str) -> Generator[TestClient, None, None]:
     settings.job_execution_mode = "queue"
     settings.auth_required = False
+    settings.skip_user_management = False
+    settings.base_tenant_slug = "sandbox"
+    settings.base_tenant_name = "Sandbox Tenant"
+    settings.test_mode = False
+    settings.log_level = "INFO"
+    settings.job_log_detail = "basic"
+    settings.persist_job_logs = True
     settings.auth_tokens_raw = ""
     settings.auth_bootstrap_key = None
     settings.jwt_secret = None
@@ -37,6 +44,13 @@ def client(isolated_db: str) -> Generator[TestClient, None, None]:
 def auth_client(isolated_db: str) -> Generator[TestClient, None, None]:
     settings.job_execution_mode = "queue"
     settings.auth_required = True
+    settings.skip_user_management = False
+    settings.base_tenant_slug = "sandbox"
+    settings.base_tenant_name = "Sandbox Tenant"
+    settings.test_mode = False
+    settings.log_level = "INFO"
+    settings.job_log_detail = "basic"
+    settings.persist_job_logs = True
     settings.auth_tokens_raw = "admin-token:admin,coach-token:coach,analyst-token:analyst,parent-token:parent,system-token:system"
     settings.auth_bootstrap_key = None
     settings.jwt_secret = "test-jwt-secret-32-char-minimum-key"
@@ -47,6 +61,11 @@ def auth_client(isolated_db: str) -> Generator[TestClient, None, None]:
         yield test_client
 
     settings.auth_required = False
+    settings.skip_user_management = False
+    settings.test_mode = False
+    settings.log_level = "INFO"
+    settings.job_log_detail = "basic"
+    settings.persist_job_logs = True
     settings.auth_tokens_raw = ""
     settings.auth_bootstrap_key = None
     settings.jwt_secret = None

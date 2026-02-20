@@ -37,6 +37,7 @@ def test_create_and_list_matches(client: TestClient) -> None:
 def test_event_upsert_patch_and_filter(client: TestClient) -> None:
     match_id = _create_match(client)
     event_id = f"evt_test_{uuid4().hex[:10]}"
+    job_id = f"job_test_{uuid4().hex[:8]}"
 
     put_resp = client.put(
         f"/v1/matches/{match_id}/events/{event_id}",
@@ -57,6 +58,7 @@ def test_event_upsert_patch_and_filter(client: TestClient) -> None:
             "participants": [],
             "evidence": {"source_asset_id": "asset_test"},
             "explanations": [{"signal": "sig", "value": 0.8}],
+            "job_id": job_id,
         },
     )
     assert put_resp.status_code == 200, put_resp.text
@@ -74,3 +76,7 @@ def test_event_upsert_patch_and_filter(client: TestClient) -> None:
     assert list_resp.status_code == 200
     items = list_resp.json()["items"]
     assert any(item["event_id"] == event_id for item in items)
+
+    list_job = client.get(f"/v1/matches/{match_id}/events?job_id={job_id}")
+    assert list_job.status_code == 200
+    assert any(item["event_id"] == event_id for item in list_job.json()["items"])

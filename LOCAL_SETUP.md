@@ -53,6 +53,12 @@ Optional API client UI:
 streamlit run app_api.py
 ```
 
+Processing portal UI:
+
+```bash
+streamlit run app.py
+```
+
 Global admin portal UI:
 
 ```bash
@@ -140,6 +146,22 @@ curl -X GET http://localhost:8000/v1/matches ^
   -H "X-Tenant-Id: default"
 ```
 
+Skip user-management for core testing (auto-provision memberships):
+
+```bash
+set VH_SKIP_USER_MANAGEMENT=true
+set VH_BASE_TENANT_SLUG=sandbox
+set VH_BASE_TENANT_NAME=Sandbox Tenant
+```
+
+Enable deep test/debug logging (including extreme job logs):
+
+```bash
+set VH_TEST_MODE=true
+set VH_LOG_LEVEL=DEBUG
+set VH_JOB_LOG_DETAIL=extreme
+```
+
 Global admin API examples:
 
 ```bash
@@ -160,6 +182,77 @@ Tenant admin API example:
 curl -X GET http://localhost:8000/v1/admin/tenant/summary ^
   -H "Authorization: Bearer tenant-admin-token" ^
   -H "X-Tenant-Id: club-a"
+```
+
+Job log and fast-kill examples:
+
+```bash
+curl -X GET http://localhost:8000/v1/jobs/{job_id}/logs?detail_level=extreme&limit=500 ^
+  -H "X-Tenant-Id: sandbox"
+```
+
+```bash
+curl -X POST http://localhost:8000/v1/jobs/{job_id}/kill-session ^
+  -H "X-Tenant-Id: sandbox" ^
+  -H "Content-Type: application/json" ^
+  -d "{}"
+```
+
+Rerun job with updated model/version targets:
+
+```bash
+curl -X POST http://localhost:8000/v1/jobs/{job_id}/rerun ^
+  -H "X-Tenant-Id: sandbox" ^
+  -H "Content-Type: application/json" ^
+  -d "{\"config_overrides\":{\"model_version\":\"event-v1\",\"focus_event_types\":[\"goal\",\"corner_kick\"]},\"reason\":\"model-upgrade\"}"
+```
+
+Create analysis-only job (bookmark table only, no clip rendering):
+
+```bash
+curl -X POST http://localhost:8000/v1/matches/{match_id}/jobs ^
+  -H "X-Tenant-Id: sandbox" ^
+  -H "Content-Type: application/json" ^
+  -d "{\"config\":{\"analysis_only\":true,\"model_version\":\"event-v1\",\"focus_event_types\":[\"goal\",\"corner_kick\"]}}"
+```
+
+Fetch bookmark/event table for a specific run:
+
+```bash
+curl -X GET "http://localhost:8000/v1/matches/{match_id}/events?job_id={job_id}&limit=1000" ^
+  -H "X-Tenant-Id: sandbox"
+```
+
+Fetch live bookmark table for a running/completed job:
+
+```bash
+curl -X GET "http://localhost:8000/v1/jobs/{job_id}/bookmarks?limit=5000" ^
+  -H "X-Tenant-Id: sandbox"
+```
+
+Delete an old run (removes run + logs + run-linked events):
+
+```bash
+curl -X DELETE "http://localhost:8000/v1/jobs/{job_id}" ^
+  -H "X-Tenant-Id: sandbox"
+```
+
+Render frame-accurate clip for an event bookmark:
+
+```bash
+curl -X POST http://localhost:8000/v1/matches/{match_id}/events/{event_id}/clip-on-demand ^
+  -H "X-Tenant-Id: sandbox" ^
+  -H "Content-Type: application/json" ^
+  -d "{\"pre_seconds\":1.5,\"post_seconds\":5.0,\"anchor\":\"event_window\",\"include_audio\":true,\"prefer_gpu\":true,\"force_rebuild\":false}"
+```
+
+Export a final highlight reel from selected bookmark events:
+
+```bash
+curl -X POST "http://localhost:8000/v1/matches/{match_id}/exports/highlights" ^
+  -H "X-Tenant-Id: sandbox" ^
+  -H "Content-Type: application/json" ^
+  -d "{\"event_ids\":[\"evt_1\",\"evt_2\"],\"pre_seconds\":1.0,\"post_seconds\":3.0,\"anchor\":\"event_window\",\"include_audio\":true,\"prefer_gpu\":true,\"title\":\"Selected Highlights\"}"
 ```
 
 S3-compatible storage mode:
@@ -215,15 +308,16 @@ docker run --rm -it --gpus all \
 Start API, queue worker, API client portal, global admin portal, and tenant admin portal:
 
 ```bash
-docker compose up --build api worker api-client admin-global admin-tenant
+docker compose up --build api worker api-client processing-ui admin-global admin-tenant
 ```
 
 Endpoints:
 
 1. API docs: `http://localhost:8000/docs`
 2. API client: `http://localhost:8501`
-3. Global admin portal: `http://localhost:8502`
-4. Tenant admin portal: `http://localhost:8503`
+3. Processing portal (dashboard + runs): `http://localhost:8504`
+4. Global admin portal: `http://localhost:8502`
+5. Tenant admin portal: `http://localhost:8503`
 
 Windows helper script:
 
@@ -231,10 +325,16 @@ Windows helper script:
 run_docker.bat
 ```
 
+Stop everything quickly:
+
+```bash
+stop_docker.bat
+```
+
 GPU worker profile:
 
 ```bash
-docker compose --profile gpu up --build api worker-gpu api-client admin-global admin-tenant
+docker compose --profile gpu up --build api worker-gpu api-client processing-ui admin-global admin-tenant
 ```
 
 Windows helper script:

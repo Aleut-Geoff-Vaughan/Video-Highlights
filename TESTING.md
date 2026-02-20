@@ -27,6 +27,12 @@ This project now includes an automated testing framework designed to evolve with
 - `tests/test_storage_backends.py`: local and S3-compatible storage backend behavior
 - `tests/test_contract_api.py`: OpenAPI path and schema-doc enum contract checks
 - `tests/test_multitenancy_admin.py`: tenant isolation and global/tenant admin API workflows
+- `tests/test_dev_skip_user_management.py`: seeded tenant + auto-provisioned membership test mode behavior
+- `tests/test_job_logging_and_kill.py`: job log persistence/query and kill-session behavior
+- `tests/test_job_bookmarks_analysis.py`: analysis-only bookmark manifest ingestion and job-linked event persistence
+- `tests/test_event_clip_on_demand.py`: frame-accurate bookmark clip-on-demand creation and cache reuse behavior
+- `tests/test_job_delete_and_live_bookmarks.py`: job-level bookmark feed and run deletion cleanup behavior
+- `tests/test_highlight_export_selected.py`: selected-bookmark highlight export generation and metadata persistence
 
 ## 4. Running Tests
 

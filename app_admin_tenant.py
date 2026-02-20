@@ -50,18 +50,22 @@ st.title("Tenant Admin Portal")
 
 with st.sidebar:
     st.header("Connection")
-    api_base = st.text_input("API Base URL", value="http://localhost:8000/v1")
-    token = st.text_input("Bearer Token", value="", type="password")
-    tenant_id = st.text_input("Tenant ID/Slug", value="default")
+    api_base = st.text_input("API Base URL", value="http://localhost:8000/v1", key="tenant_sidebar_api_base")
+    token = st.text_input("Bearer Token", value="", type="password", key="tenant_sidebar_token")
+    tenant_id = st.text_input("Tenant ID/Slug", value="sandbox", key="tenant_sidebar_tenant_id")
     st.caption("Optional dev fallback headers (only when auth is disabled)")
-    x_user_id = st.text_input("X-User-Id", value="tenant_admin_1")
-    x_user_role = st.selectbox("X-User-Role", ["tenant_admin", "coach", "analyst", "admin", "parent", "system"])
+    x_user_id = st.text_input("X-User-Id", value="tenant_admin_1", key="tenant_sidebar_user_id")
+    x_user_role = st.selectbox(
+        "X-User-Role",
+        ["tenant_admin", "coach", "analyst", "admin", "parent", "system"],
+        key="tenant_sidebar_user_role",
+    )
 
 tabs = st.tabs(["Summary", "Users", "Memberships", "Matches"])
 
 
 with tabs[0]:
-    if st.button("Refresh Tenant Summary"):
+    if st.button("Refresh Tenant Summary", key="tenant_summary_refresh"):
         result = api_request(
             "GET",
             api_base,
@@ -73,7 +77,7 @@ with tabs[0]:
         )
         st.json(result)
 
-    if st.button("Refresh Tenant Inventory"):
+    if st.button("Refresh Tenant Inventory", key="tenant_inventory_refresh"):
         result = api_request(
             "GET",
             api_base,
@@ -88,15 +92,34 @@ with tabs[0]:
 
 with tabs[1]:
     st.subheader("Create Tenant User")
-    create_user_id = st.text_input("User ID", value="team_user_1")
-    create_email = st.text_input("Email", value="team_user_1@example.com")
-    create_name = st.text_input("Display Name", value="Team User 1")
-    create_role = st.selectbox("Role", ["coach", "analyst", "parent", "player", "tenant_admin"])
-    create_user_status = st.selectbox("User Status", ["active", "disabled", "invited"], index=0)
-    create_membership_status = st.selectbox("Membership Status", ["active", "invited", "disabled"], index=0)
-    create_user_meta = st.text_area("User Metadata JSON", value="{}", height=100)
-    create_membership_meta = st.text_area("Membership Metadata JSON", value="{}", height=100)
-    if st.button("Create Tenant User"):
+    create_user_id = st.text_input("User ID", value="team_user_1", key="tenant_create_user_id")
+    create_email = st.text_input("Email", value="team_user_1@example.com", key="tenant_create_user_email")
+    create_name = st.text_input("Display Name", value="Team User 1", key="tenant_create_user_display_name")
+    create_role = st.selectbox(
+        "Role",
+        ["coach", "analyst", "parent", "player", "tenant_admin"],
+        key="tenant_create_user_role",
+    )
+    create_user_status = st.selectbox(
+        "User Status",
+        ["active", "disabled", "invited"],
+        index=0,
+        key="tenant_create_user_status",
+    )
+    create_membership_status = st.selectbox(
+        "Membership Status",
+        ["active", "invited", "disabled"],
+        index=0,
+        key="tenant_create_membership_status",
+    )
+    create_user_meta = st.text_area("User Metadata JSON", value="{}", height=100, key="tenant_create_user_meta")
+    create_membership_meta = st.text_area(
+        "Membership Metadata JSON",
+        value="{}",
+        height=100,
+        key="tenant_create_membership_meta",
+    )
+    if st.button("Create Tenant User", key="tenant_create_user_btn"):
         try:
             user_meta = json.loads(create_user_meta) if create_user_meta.strip() else {}
             membership_meta = json.loads(create_membership_meta) if create_membership_meta.strip() else {}
@@ -127,7 +150,7 @@ with tabs[1]:
             st.json(result)
 
     st.subheader("List Tenant Users")
-    if st.button("List Tenant Users"):
+    if st.button("List Tenant Users", key="tenant_list_users_btn"):
         result = api_request(
             "GET",
             api_base,
@@ -140,11 +163,26 @@ with tabs[1]:
         st.json(result)
 
     st.subheader("Patch Tenant User")
-    patch_user_id = st.text_input("Patch User ID", value="")
-    patch_role = st.selectbox("Patch Role", ["coach", "analyst", "parent", "player", "tenant_admin"], index=0)
-    patch_user_status = st.selectbox("Patch User Status", ["active", "disabled", "invited"], index=0)
-    patch_membership_status = st.selectbox("Patch Membership Status", ["active", "invited", "disabled"], index=0)
-    if st.button("Patch Tenant User", disabled=not patch_user_id.strip()):
+    patch_user_id = st.text_input("Patch User ID", value="", key="tenant_patch_user_id")
+    patch_role = st.selectbox(
+        "Patch Role",
+        ["coach", "analyst", "parent", "player", "tenant_admin"],
+        index=0,
+        key="tenant_patch_role",
+    )
+    patch_user_status = st.selectbox(
+        "Patch User Status",
+        ["active", "disabled", "invited"],
+        index=0,
+        key="tenant_patch_user_status",
+    )
+    patch_membership_status = st.selectbox(
+        "Patch Membership Status",
+        ["active", "invited", "disabled"],
+        index=0,
+        key="tenant_patch_membership_status",
+    )
+    if st.button("Patch Tenant User", disabled=not patch_user_id.strip(), key="tenant_patch_user_btn"):
         result = api_request(
             "PATCH",
             api_base,
@@ -164,11 +202,19 @@ with tabs[1]:
 
 with tabs[2]:
     st.subheader("Patch Membership")
-    membership_id = st.text_input("Membership ID", value="")
-    membership_role = st.selectbox("Membership Role", ["tenant_admin", "coach", "analyst", "parent", "player", "system"])
-    membership_status = st.selectbox("Membership Status", ["active", "invited", "disabled"])
-    membership_meta = st.text_area("Membership Metadata JSON ", value="{}", height=100)
-    if st.button("Patch Membership", disabled=not membership_id.strip()):
+    membership_id = st.text_input("Membership ID", value="", key="tenant_patch_membership_id")
+    membership_role = st.selectbox(
+        "Membership Role",
+        ["tenant_admin", "coach", "analyst", "parent", "player", "system"],
+        key="tenant_patch_membership_role",
+    )
+    membership_status = st.selectbox(
+        "Membership Status",
+        ["active", "invited", "disabled"],
+        key="tenant_patch_membership_status_value",
+    )
+    membership_meta = st.text_area("Membership Metadata JSON ", value="{}", height=100, key="tenant_patch_membership_meta")
+    if st.button("Patch Membership", disabled=not membership_id.strip(), key="tenant_patch_membership_btn"):
         try:
             metadata = json.loads(membership_meta) if membership_meta.strip() else {}
         except json.JSONDecodeError:
@@ -189,7 +235,7 @@ with tabs[2]:
 
 
 with tabs[3]:
-    if st.button("List Tenant Matches"):
+    if st.button("List Tenant Matches", key="tenant_list_matches_btn"):
         result = api_request(
             "GET",
             api_base,

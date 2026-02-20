@@ -70,6 +70,7 @@ class ProcessingJob(SQLModel, table=True):
     tenant_id: Optional[str] = Field(default=None, foreign_key="tenants.id", index=True)
     match_id: str = Field(foreign_key="matches.id", index=True)
     status: str = Field(default="queued", index=True)
+    cancel_requested: bool = Field(default=False, index=True)
     stage: Optional[str] = Field(default="queued")
     progress: float = Field(default=0.0)
     config_json: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
@@ -79,6 +80,20 @@ class ProcessingJob(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=utcnow, nullable=False)
     started_at: Optional[datetime] = Field(default=None)
     completed_at: Optional[datetime] = Field(default=None)
+
+
+class JobLogEntry(SQLModel, table=True):
+    __tablename__ = "job_logs"
+
+    id: str = Field(default_factory=lambda: generate_id("jlog"), primary_key=True)
+    tenant_id: Optional[str] = Field(default=None, foreign_key="tenants.id", index=True)
+    job_id: str = Field(foreign_key="processing_jobs.id", index=True)
+    level: str = Field(default="info", index=True)  # debug|info|warning|error
+    detail_level: str = Field(default="basic", index=True)  # basic|detailed|extreme
+    stage: Optional[str] = Field(default=None, index=True)
+    message: str = Field(default="")
+    data_json: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=utcnow, nullable=False, index=True)
 
 
 class Event(SQLModel, table=True):

@@ -11,6 +11,8 @@ from backend.schemas import EventType, FeedbackType
 REQUIRED_PATHS = {
     "/v1/matches/{match_id}/events",
     "/v1/matches/{match_id}/events/{event_id}",
+    "/v1/matches/{match_id}/events/{event_id}/clip-on-demand",
+    "/v1/matches/{match_id}/exports/highlights",
     "/v1/matches/{match_id}/events/{event_id}/feedback",
     "/v1/matches/{match_id}/feedback",
     "/v1/training/feedback-batches",
@@ -26,6 +28,11 @@ REQUIRED_PATHS = {
     "/v1/admin/global/tenants/{tenant_id}/memberships",
     "/v1/admin/tenant/summary",
     "/v1/admin/tenant/users",
+    "/v1/jobs/{job_id}/logs",
+    "/v1/jobs/{job_id}/bookmarks",
+    "/v1/jobs/{job_id}/kill-session",
+    "/v1/jobs/{job_id}/rerun",
+    "/v1/jobs/{job_id}",
 }
 
 

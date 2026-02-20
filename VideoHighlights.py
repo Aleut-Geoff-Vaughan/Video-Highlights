@@ -50,6 +50,9 @@ import os
 import sys
 import math
 import argparse
+import csv
+import json
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import List, Tuple, Dict, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -214,6 +217,162 @@ def merge_intervals(intervals: List[Tuple[float, float]], min_gap: float = 0.75)
         else:
             merged.append((s, e))
     return merged
+
+
+def _interval_overlap_seconds(a: Tuple[float, float], b: Tuple[float, float]) -> float:
+    return max(0.0, min(a[1], b[1]) - max(a[0], b[0]))
+
+
+def _pick_event_type(
+    has_speed_signal: bool,
+    has_audio_signal: bool,
+    requested_targets: List[str],
+) -> str:
+    allowed_types = {
+        "goal",
+        "shot",
+        "corner_kick",
+        "penalty_kick",
+        "free_kick",
+        "goal_kick",
+        "kickoff",
+        "foul",
+        "save",
+    }
+    targets = [item for item in requested_targets if item in allowed_types]
+    if len(set(targets)) == 1:
+        return targets[0]
+
+    if has_speed_signal and has_audio_signal:
+        for candidate in ("goal", "shot", "penalty_kick", "save"):
+            if candidate in targets:
+                return candidate
+        return "goal"
+
+    if has_speed_signal:
+        for candidate in ("shot", "goal", "penalty_kick", "corner_kick", "free_kick", "save"):
+            if candidate in targets:
+                return candidate
+        return "shot"
+
+    if has_audio_signal:
+        for candidate in ("foul", "kickoff", "goal", "corner_kick"):
+            if candidate in targets:
+                return candidate
+        return "foul"
+
+    if targets:
+        return targets[0]
+    return "shot"
+
+
+def build_analysis_bookmarks(
+    original_intervals: List[Tuple[float, float]],
+    speed_intervals: List[Tuple[float, float]],
+    audio_intervals: List[Tuple[float, float]],
+    requested_targets: List[str],
+    live_manifest_path: Optional[str] = None,
+    live_manifest_context: Optional[Dict[str, object]] = None,
+) -> List[Dict[str, object]]:
+    bookmarks: List[Dict[str, object]] = []
+    context = dict(live_manifest_context or {})
+
+    def _write_live_manifest() -> None:
+        if not live_manifest_path:
+            return
+        payload = dict(context)
+        payload["bookmarks"] = list(bookmarks)
+        payload["stats"] = dict(payload.get("stats", {}))
+        payload["stats"]["bookmark_count"] = len(bookmarks)
+        try:
+            with open(live_manifest_path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2)
+        except Exception:
+            pass
+
+    _write_live_manifest()
+    for idx, (start_s, end_s) in enumerate(original_intervals, start=1):
+        speed_overlap = sum(_interval_overlap_seconds((start_s, end_s), interval) for interval in speed_intervals)
+        audio_overlap = sum(_interval_overlap_seconds((start_s, end_s), interval) for interval in audio_intervals)
+        has_speed_signal = speed_overlap > 0.0
+        has_audio_signal = audio_overlap > 0.0
+
+        event_type = _pick_event_type(has_speed_signal, has_audio_signal, requested_targets)
+        confidence = 0.45
+        if has_speed_signal:
+            confidence += 0.22
+        if has_audio_signal:
+            confidence += 0.18
+        if requested_targets and event_type in requested_targets:
+            confidence += 0.08
+        confidence = float(min(0.99, round(confidence, 3)))
+
+        sources: List[str] = []
+        if has_speed_signal:
+            sources.append("motion")
+        if has_audio_signal:
+            sources.append("audio")
+        if not sources:
+            sources.append("motion")
+
+        occurred_at_s = (start_s + end_s) / 2.0
+        duration_s = max(0.0, end_s - start_s)
+        bookmarks.append(
+            {
+                "bookmark_id": f"bm_{idx:04d}",
+                "index": idx,
+                "event_type": event_type,
+                "label": f"{event_type}_candidate",
+                "confidence": confidence,
+                "start_s": round(start_s, 3),
+                "occurred_at_s": round(occurred_at_s, 3),
+                "end_s": round(end_s, 3),
+                "duration_s": round(duration_s, 3),
+                "sources": sources,
+                "signals": {
+                    "speed_overlap_s": round(speed_overlap, 3),
+                    "audio_overlap_s": round(audio_overlap, 3),
+                },
+            }
+        )
+        _write_live_manifest()
+    return bookmarks
+
+
+def write_analysis_bookmark_files(
+    output_dir: str,
+    manifest: Dict[str, object],
+) -> Tuple[str, str]:
+    json_path = os.path.join(output_dir, "analysis_bookmarks.json")
+    csv_path = os.path.join(output_dir, "analysis_bookmarks.csv")
+
+    with open(json_path, "w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, indent=2)
+
+    bookmarks = list(manifest.get("bookmarks", []) or [])
+    field_names = [
+        "bookmark_id",
+        "index",
+        "event_type",
+        "label",
+        "confidence",
+        "start_s",
+        "occurred_at_s",
+        "end_s",
+        "duration_s",
+        "sources",
+    ]
+    with open(csv_path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=field_names)
+        writer.writeheader()
+        for item in bookmarks:
+            row = {name: item.get(name) for name in field_names}
+            sources = row.get("sources", [])
+            if isinstance(sources, list):
+                row["sources"] = ",".join(str(source) for source in sources)
+            writer.writerow(row)
+
+    return json_path, csv_path
 
 
 def track_video(video_path: str, fps_hint: Optional[float] = None, select_roi: bool = False) -> Tuple[Dict[int, List[TrackPoint]], List[TrackPoint], float, Tuple[int,int]]:
@@ -576,8 +735,10 @@ def check_nvenc_available() -> bool:
         import subprocess
         result = subprocess.run(['ffmpeg', '-hide_banner', '-encoders'],
                               capture_output=True, text=True, timeout=5)
-        return 'h264_nvenc' in result.stdout
-    except:
+        output = f"{result.stdout}\n{result.stderr}".lower()
+        # Require the encoder token in the ffmpeg encoder list.
+        return " h264_nvenc" in output or "h264_nvenc " in output
+    except Exception:
         return False
 
 # Global flag for NVENC availability (checked once)
@@ -609,25 +770,54 @@ def write_single_subclip(video_path: str, interval: Tuple[float, float], clip_nu
 
         out_path = os.path.join(out_dir, f"highlight_{clip_num:02d}.mp4")
 
-        # Choose codec based on availability
-        codec = "h264_nvenc" if _NVENC_AVAILABLE else "libx264"
-        codec_params = []
+        # Build ordered fallback list. If NVENC fails at runtime, auto-fallback to libx264.
+        encoding_attempts = []
         if _NVENC_AVAILABLE:
-            # NVENC parameters for faster encoding
-            codec_params = ['-preset', 'fast', '-b:v', '5M']
-        else:
-            # libx264 parameters for faster encoding
-            codec_params = ['-preset', 'faster', '-crf', '23']
+            encoding_attempts.append(("h264_nvenc", ['-preset', 'fast', '-b:v', '5M']))
+        encoding_attempts.append(("libx264", ['-preset', 'faster', '-crf', '23']))
+        encoding_attempts.append(("mpeg4", ['-q:v', '3']))
 
-        # Try with audio first, fallback to no audio if it fails
-        try:
-            sub.write_videofile(out_path, codec=codec, audio_codec="aac", logger=None,
-                              threads=2, ffmpeg_params=codec_params)
-        except (AttributeError, OSError) as audio_err:
-            print(f"[warn] Audio processing failed for clip {clip_num}, retrying without audio: {audio_err}")
-            sub.write_videofile(out_path, codec=codec, audio=False, logger=None,
-                              threads=2, ffmpeg_params=codec_params)
-        return out_path
+        last_error = None
+        for codec, codec_params in encoding_attempts:
+            try:
+                try:
+                    sub.write_videofile(
+                        out_path,
+                        codec=codec,
+                        audio_codec="aac",
+                        logger=None,
+                        threads=2,
+                        ffmpeg_params=codec_params,
+                    )
+                except (AttributeError, OSError) as audio_err:
+                    print(f"[warn] Audio processing failed for clip {clip_num} with {codec}, retrying without audio: {audio_err}")
+                    sub.write_videofile(
+                        out_path,
+                        codec=codec,
+                        audio=False,
+                        logger=None,
+                        threads=2,
+                        ffmpeg_params=codec_params,
+                    )
+                return out_path
+            except Exception as codec_err:
+                last_error = codec_err
+                msg = str(codec_err).lower()
+                print(f"[warn] Codec {codec} failed for clip {clip_num}: {codec_err}")
+
+                # If NVENC failed, disable it globally for the remainder of the process.
+                if codec == "h264_nvenc":
+                    if "unknown encoder" in msg or "encoder not found" in msg or "error selecting an encoder" in msg:
+                        _NVENC_AVAILABLE = False
+                        print("[warn] NVENC unavailable at runtime. Falling back to CPU codec (libx264).")
+                    elif "broken pipe" in msg:
+                        _NVENC_AVAILABLE = False
+                        print("[warn] NVENC pipeline unstable (broken pipe). Falling back to CPU codec (libx264).")
+                continue
+
+        if last_error is not None:
+            raise last_error
+        return None
     except Exception as ex:
         print(f"[warn] Failed to write clip {clip_num} ({s:.1f}s - {e:.1f}s): {ex}")
         return None
@@ -806,7 +996,10 @@ def process_video_highlights(
     threads: Optional[int] = None,
     require_gpu: bool = False,
     speed_sensitivity: float = 2.0,
-    audio_sensitivity: float = 2.0
+    audio_sensitivity: float = 2.0,
+    focus_event_types: Optional[List[str]] = None,
+    model_version: Optional[str] = None,
+    analysis_only: bool = False,
 ) -> bool:
     """
     Core video highlights processing function.
@@ -825,6 +1018,9 @@ def process_video_highlights(
         trim_end: End time in seconds (None for end)
         threads: Number of parallel threads for clip writing
         require_gpu: Require GPU acceleration (fail if not available)
+        focus_event_types: Optional event targets to bias tuning and record run intent
+        model_version: Optional model version label for run traceability
+        analysis_only: Run analysis/bookmark generation without writing highlight clips
 
     Returns:
         True if processing succeeded, False otherwise
@@ -856,12 +1052,31 @@ def process_video_highlights(
     # Print configuration
     print(f"\nProcessing video: {video_path}")
     print(f"Output directory: {output_dir}")
+    if model_version:
+        print(f"Model version: {model_version}")
+    requested_targets: List[str] = [str(item).strip().lower() for item in (focus_event_types or []) if str(item).strip()]
+    if requested_targets:
+        print(f"Focus event targets: {', '.join(requested_targets)}")
+        # If sensitivity values are defaults, adapt them slightly for requested targets.
+        # This does not replace event classification; it tunes highlight candidate generation.
+        explosive_targets = {"goal", "shot", "penalty_kick", "save"}
+        restart_targets = {"corner_kick", "free_kick", "goal_kick", "kickoff"}
+        foul_targets = {"foul"}
+        target_set = set(requested_targets)
+        if speed_sensitivity == 2.0 and target_set.intersection(explosive_targets):
+            speed_sensitivity = 1.8
+        if audio_sensitivity == 2.0 and target_set.intersection(foul_targets):
+            audio_sensitivity = 1.7
+        if target_set.intersection(restart_targets):
+            pre_seconds = max(pre_seconds, 3.0)
+            post_seconds = max(post_seconds, 7.0)
     if trim_start is not None or trim_end is not None:
         print(f"Trim range: {format_time(trim_start or 0)} to {format_time(trim_end) if trim_end else 'end'}")
     print(f"Pre-event buffer: {pre_seconds}s")
     print(f"Post-event buffer: {post_seconds}s")
     print(f"Manual selection: {'Yes' if select_player else 'No'}")
     print(f"Spotlight overlay: {'Yes' if overlay else 'No'}")
+    print(f"Analysis-only mode: {'Yes' if analysis_only else 'No'}")
     print()
 
     ensure_dir(output_dir)
@@ -924,16 +1139,72 @@ def process_video_highlights(
 
         print(f"[debug] Final intervals after clamping: {len(intervals)}")
 
-        if not intervals:
-            print("No highlight intervals found. Try lowering thresholds or ensure --select is used.")
-            return False
-
         # Adjust intervals back to original video timestamps if trimmed
         original_intervals = [(s + trim_offset, e + trim_offset) for s, e in intervals]
+        original_speed_intervals = [(s + trim_offset, e + trim_offset) for s, e in speed_intervals]
+        original_audio_intervals = [(s + trim_offset, e + trim_offset) for s, e in audio_intervals]
         print(f"[debug] Original video intervals (with trim offset +{trim_offset:.2f}s): {len(original_intervals)}")
 
         if trim_offset > 0:
             print(f"[info] Found {len(intervals)} highlights. Adjusting timestamps to original video (offset: +{format_time(trim_offset)})")
+
+        live_manifest_path = os.path.join(output_dir, "analysis_bookmarks.json")
+        live_manifest_context: Dict[str, object] = {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "video_path": original_video,
+            "processing_video_path": processing_video,
+            "output_dir": output_dir,
+            "analysis_only": analysis_only,
+            "model_version": model_version,
+            "focus_event_types": requested_targets,
+            "trim_offset_seconds": round(trim_offset, 3),
+            "settings": {
+                "pre_seconds": pre_seconds,
+                "post_seconds": post_seconds,
+                "min_clip_duration": min_clip_duration,
+                "speed_sensitivity": speed_sensitivity,
+                "audio_sensitivity": audio_sensitivity,
+                "no_audio": no_audio,
+                "overlay": overlay,
+                "threads": threads,
+            },
+            "stats": {
+                "speed_interval_count": len(speed_intervals),
+                "audio_interval_count": len(audio_intervals),
+                "merged_interval_count": len(intervals),
+                "bookmark_count": 0,
+            },
+        }
+
+        bookmarks = build_analysis_bookmarks(
+            original_intervals=original_intervals,
+            speed_intervals=original_speed_intervals,
+            audio_intervals=original_audio_intervals,
+            requested_targets=requested_targets,
+            live_manifest_path=live_manifest_path,
+            live_manifest_context=live_manifest_context,
+        )
+        manifest: Dict[str, object] = {
+            **live_manifest_context,
+            "stats": {
+                "speed_interval_count": len(speed_intervals),
+                "audio_interval_count": len(audio_intervals),
+                "merged_interval_count": len(intervals),
+                "bookmark_count": len(bookmarks),
+            },
+            "bookmarks": bookmarks,
+        }
+        manifest_path, csv_path = write_analysis_bookmark_files(output_dir, manifest)
+        print(f"[analysis] Bookmark manifest: {manifest_path}")
+        print(f"[analysis] Bookmark table: {csv_path}")
+
+        if not intervals:
+            print("No highlight intervals found. Bookmark table generated for manual review.")
+            return bool(analysis_only)
+
+        if analysis_only:
+            print("[analysis] Analysis-only run complete. Skipped clip rendering.")
+            return True
 
         print("[5/5] Writing subclips...")
         clip_paths = write_subclips(original_video, original_intervals, output_dir, max_workers=threads)
@@ -983,6 +1254,7 @@ def main():
     ap.add_argument("--threads", type=int, default=None, help="Number of parallel threads for clip writing (default: auto, max 4)")
     ap.add_argument("--speed-sensitivity", type=float, default=2.0, help="Speed detection sensitivity (lower = more sensitive, default: 2.0, old default was 3.0)")
     ap.add_argument("--audio-sensitivity", type=float, default=2.0, help="Audio peak detection sensitivity (lower = more sensitive, default: 2.0, old default was 3.0)")
+    ap.add_argument("--analysis-only", action="store_true", help="Run detection/bookmark analysis without writing highlight clips")
     args = ap.parse_args()
 
     # Interactive mode if video or output not provided
@@ -1024,6 +1296,11 @@ def main():
     if not args.overlay and sys.stdin.isatty():
         overlay_input = input("Do you want to render spotlight overlay clips? (slower) (y/N): ").strip().lower()
         args.overlay = overlay_input in ['y', 'yes']
+
+    # Ask about analysis-only mode if not already set
+    if not args.analysis_only and sys.stdin.isatty():
+        analysis_input = input("Run analysis-only mode (bookmarks table, no clip rendering)? (y/N): ").strip().lower()
+        args.analysis_only = analysis_input in ['y', 'yes']
 
     # Ask about trimming if not already set
     trim_start_seconds = None
@@ -1078,7 +1355,8 @@ def main():
         threads=args.threads,
         require_gpu=False,  # CLI doesn't require GPU by default
         speed_sensitivity=args.speed_sensitivity,
-        audio_sensitivity=args.audio_sensitivity
+        audio_sensitivity=args.audio_sensitivity,
+        analysis_only=args.analysis_only,
     )
 
     if not success:

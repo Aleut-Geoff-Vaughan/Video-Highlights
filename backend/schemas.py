@@ -20,6 +20,7 @@ EventType = Literal[
     "goal_kick",
     "kickoff",
     "foul",
+    "save",
 ]
 
 EventStatus = Literal["auto_detected", "confirmed", "corrected", "rejected"]
@@ -80,11 +81,17 @@ class JobCreate(BaseModel):
     config: Dict[str, Any] = Field(default_factory=dict)
 
 
+class JobRerunRequest(BaseModel):
+    config_overrides: Dict[str, Any] = Field(default_factory=dict)
+    reason: Optional[str] = None
+
+
 class JobRead(BaseModel):
     job_id: str
     tenant_id: Optional[str] = None
     match_id: str
     status: str
+    cancel_requested: bool = False
     stage: Optional[str] = None
     progress: float = 0.0
     config: Dict[str, Any] = Field(default_factory=dict)
@@ -94,6 +101,18 @@ class JobRead(BaseModel):
     updated_at: datetime
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+
+
+class JobLogRead(BaseModel):
+    log_id: str
+    job_id: str
+    tenant_id: Optional[str] = None
+    level: str
+    detail_level: str
+    stage: Optional[str] = None
+    message: str
+    data: Dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
 
 
 class Participant(BaseModel):
@@ -196,6 +215,54 @@ class EventRead(BaseModel):
     explanations: List[Dict[str, Any]] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
+
+
+class EventClipRequest(BaseModel):
+    pre_seconds: float = Field(default=2.0, ge=0.0, le=120.0)
+    post_seconds: float = Field(default=8.0, ge=0.0, le=300.0)
+    anchor: Literal["occurred_at", "event_window"] = "event_window"
+    include_audio: bool = True
+    prefer_gpu: bool = True
+    force_rebuild: bool = False
+    expires_seconds: int = Field(default=3600, ge=60, le=86400)
+
+
+class EventClipRead(BaseModel):
+    clip_id: str
+    match_id: str
+    event_id: str
+    asset_id: str
+    path: str
+    download_url: str
+    start_ms: int
+    end_ms: int
+    duration_ms: int
+    include_audio: bool = True
+    anchor: str
+    reused_existing: bool = False
+
+
+class HighlightExportRequest(BaseModel):
+    event_ids: List[str] = Field(default_factory=list, min_length=1)
+    pre_seconds: float = Field(default=1.5, ge=0.0, le=120.0)
+    post_seconds: float = Field(default=5.0, ge=0.0, le=300.0)
+    anchor: Literal["occurred_at", "event_window"] = "event_window"
+    include_audio: bool = True
+    prefer_gpu: bool = True
+    title: Optional[str] = None
+    expires_seconds: int = Field(default=3600, ge=60, le=86400)
+
+
+class HighlightExportRead(BaseModel):
+    export_id: str
+    match_id: str
+    event_ids: List[str] = Field(default_factory=list)
+    clip_count: int = 0
+    asset_id: str
+    path: str
+    download_url: str
+    duration_ms: int = 0
+    created_at: str
 
 
 class FeedbackSubmittedBy(BaseModel):

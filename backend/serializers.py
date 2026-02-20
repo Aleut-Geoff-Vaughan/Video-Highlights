@@ -3,6 +3,7 @@ from __future__ import annotations
 from .models import (
     Event,
     EventFeedback,
+    JobLogEntry,
     Match,
     ProcessingJob,
     Tenant,
@@ -16,6 +17,7 @@ from .schemas import (
     FeedbackBatchRead,
     FeedbackRead,
     JobRead,
+    JobLogRead,
     MatchRead,
     TenantMembershipRead,
     TenantRead,
@@ -45,6 +47,7 @@ def job_to_read(job: ProcessingJob) -> JobRead:
         tenant_id=job.tenant_id,
         match_id=job.match_id,
         status=job.status,
+        cancel_requested=job.cancel_requested,
         stage=job.stage,
         progress=job.progress,
         config=job.config_json or {},
@@ -54,6 +57,20 @@ def job_to_read(job: ProcessingJob) -> JobRead:
         updated_at=job.updated_at,
         started_at=job.started_at,
         completed_at=job.completed_at,
+    )
+
+
+def job_log_to_read(item: JobLogEntry) -> JobLogRead:
+    return JobLogRead(
+        log_id=item.id,
+        job_id=item.job_id,
+        tenant_id=item.tenant_id,
+        level=item.level,
+        detail_level=item.detail_level,
+        stage=item.stage,
+        message=item.message,
+        data=item.data_json or {},
+        created_at=item.created_at,
     )
 
 

@@ -62,7 +62,7 @@ with st.sidebar:
     st.header("Connection")
     api_base = st.text_input("API Base URL", value="http://localhost:8000/v1")
     token = st.text_input("Bearer Token (optional)", key="api_token", value="", type="password")
-    tenant_id = st.text_input("Tenant ID/Slug (optional)", key="tenant_id", value="default")
+    tenant_id = st.text_input("Tenant ID/Slug (optional)", key="tenant_id", value="sandbox")
     bootstrap_key = st.text_input("Bootstrap Key (optional)", key="bootstrap_key", value="", type="password")
     auto_refresh = st.checkbox("Auto refresh job status", value=False)
 
@@ -246,6 +246,28 @@ with tabs[3]:
         if result["ok"]:
             st.session_state.job_id = result["payload"]["job_id"]
 
+    if st.button("Cancel Job", disabled=not st.session_state.job_id):
+        r = api_request(
+            "POST",
+            api_base,
+            f"/jobs/{st.session_state.job_id}/cancel",
+            token=token or None,
+            tenant_id=tenant_id or None,
+            json_body={},
+        )
+        st.json(parse_response(r))
+
+    if st.button("Kill Job Session", disabled=not st.session_state.job_id):
+        r = api_request(
+            "POST",
+            api_base,
+            f"/jobs/{st.session_state.job_id}/kill-session",
+            token=token or None,
+            tenant_id=tenant_id or None,
+            json_body={},
+        )
+        st.json(parse_response(r))
+
     if st.button("Worker Run Once"):
         r = api_request(
             "POST",
@@ -256,6 +278,46 @@ with tabs[3]:
             json_body={},
         )
         st.json(parse_response(r))
+
+    st.subheader("Job Logs")
+    log_col1, log_col2, log_col3, log_col4 = st.columns(4)
+    with log_col1:
+        log_level_filter = st.selectbox(
+            "Level Filter",
+            ["all", "debug", "info", "warning", "error"],
+            index=0,
+            key="job_log_level_filter",
+        )
+    with log_col2:
+        log_detail_filter = st.selectbox(
+            "Detail Filter",
+            ["all", "basic", "detailed", "extreme"],
+            index=0,
+            key="job_log_detail_filter",
+        )
+    with log_col3:
+        log_stage_filter = st.text_input("Stage Filter", value="", key="job_log_stage_filter")
+    with log_col4:
+        log_limit = st.number_input("Log Limit", min_value=10, max_value=5000, value=200, key="job_log_limit")
+
+    if st.button("Fetch Job Logs", disabled=not st.session_state.job_id, key="fetch_job_logs_btn"):
+        params = [f"limit={int(log_limit)}"]
+        if log_level_filter != "all":
+            params.append(f"level={log_level_filter}")
+        if log_detail_filter != "all":
+            params.append(f"detail_level={log_detail_filter}")
+        if log_stage_filter.strip():
+            params.append(f"stage={log_stage_filter.strip()}")
+        suffix = f"?{'&'.join(params)}" if params else ""
+        r = api_request(
+            "GET",
+            api_base,
+            f"/jobs/{st.session_state.job_id}/logs{suffix}",
+            token=token or None,
+            tenant_id=tenant_id or None,
+        )
+        result = parse_response(r)
+        st.json(result)
 
 
 with tabs[4]:
@@ -292,6 +354,35 @@ with tabs[4]:
         if result["ok"] and result["payload"].get("items"):
             first = result["payload"]["items"][0]
             st.session_state.event_id = first.get("event_id", "")
+
+    st.subheader("Event Clip On Demand")
+    st.text_input("Event ID  ", key="event_id")
+    clip_col1, clip_col2 = st.columns(2)
+    with clip_col1:
+        clip_pre = st.number_input("Pre Seconds", min_value=0.0, max_value=120.0, value=1.5, step=0.5)
+        clip_anchor = st.selectbox("Anchor", ["event_window", "occurred_at"], index=0)
+    with clip_col2:
+        clip_post = st.number_input("Post Seconds", min_value=0.0, max_value=300.0, value=5.0, step=0.5)
+        clip_audio = st.checkbox("Include Audio", value=True)
+    if st.button("Render Event Clip", disabled=not st.session_state.match_id or not st.session_state.event_id):
+        r = api_request(
+            "POST",
+            api_base,
+            f"/matches/{st.session_state.match_id}/events/{st.session_state.event_id}/clip-on-demand",
+            token=token or None,
+            tenant_id=tenant_id or None,
+            json_body={
+                "pre_seconds": float(clip_pre),
+                "post_seconds": float(clip_post),
+                "anchor": clip_anchor,
+                "include_audio": bool(clip_audio),
+                "prefer_gpu": True,
+                "force_rebuild": False,
+            },
+            timeout=300,
+        )
+        result = parse_response(r)
+        st.json(result)
 
 
 with tabs[5]:

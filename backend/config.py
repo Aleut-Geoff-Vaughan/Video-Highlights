@@ -9,6 +9,7 @@ class Settings:
     api_title: str = "Video Highlights API"
     api_version: str = "0.1.0"
     db_url: str = os.getenv("VH_DB_URL", "sqlite:///./video_highlights_v1.db")
+    test_mode: bool = os.getenv("VH_TEST_MODE", "false").lower() in {"1", "true", "yes"}
     job_max_workers: int = int(os.getenv("VH_JOB_MAX_WORKERS", "2"))
     output_root: str = os.getenv("VH_OUTPUT_ROOT", "./outputs")
     llm_provider: str = os.getenv("VH_LLM_PROVIDER", "none").lower()
@@ -31,6 +32,12 @@ class Settings:
     s3_access_key_id: str | None = os.getenv("VH_S3_ACCESS_KEY_ID")
     s3_secret_access_key: str | None = os.getenv("VH_S3_SECRET_ACCESS_KEY")
     s3_key_prefix: str = os.getenv("VH_S3_KEY_PREFIX", "video-highlights")
+    skip_user_management: bool = os.getenv("VH_SKIP_USER_MANAGEMENT", "false").lower() in {"1", "true", "yes"}
+    base_tenant_slug: str = os.getenv("VH_BASE_TENANT_SLUG", "sandbox")
+    base_tenant_name: str = os.getenv("VH_BASE_TENANT_NAME", "Sandbox Tenant")
+    log_level: str = os.getenv("VH_LOG_LEVEL", "DEBUG" if test_mode else "INFO").upper()
+    job_log_detail: str = os.getenv("VH_JOB_LOG_DETAIL", "extreme" if test_mode else "basic").lower()
+    persist_job_logs: bool = os.getenv("VH_PERSIST_JOB_LOGS", "true").lower() in {"1", "true", "yes"}
 
     @property
     @lru_cache(maxsize=1)
