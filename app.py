@@ -9,9 +9,11 @@ Run:
 from __future__ import annotations
 
 import os
+import re
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlencode
 
 import requests
 import streamlit as st
@@ -585,10 +587,564 @@ def safe_rerun() -> None:
         legacy_fn()
 
 
+def _flatten_query_value(value: Any) -> str:
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return ""
+        return str(value[0])
+    return str(value)
+
+
+def _read_query_params() -> Dict[str, str]:
+    modern = getattr(st, "query_params", None)
+    if modern is not None:
+        try:
+            return {
+                str(key): _flatten_query_value(value)
+                for key, value in dict(modern).items()
+            }
+        except Exception:
+            pass
+
+    legacy_get = getattr(st, "experimental_get_query_params", None)
+    if callable(legacy_get):
+        try:
+            raw = legacy_get()
+            return {
+                str(key): _flatten_query_value(value)
+                for key, value in dict(raw).items()
+            }
+        except Exception:
+            pass
+    return {}
+
+
+def _write_query_params(params: Dict[str, str]) -> None:
+    cleaned = {
+        str(key): str(value).strip()
+        for key, value in params.items()
+        if str(value).strip()
+    }
+    current = _read_query_params()
+    if current == cleaned:
+        return
+
+    modern = getattr(st, "query_params", None)
+    if modern is not None:
+        try:
+            modern.clear()
+            for key, value in cleaned.items():
+                modern[key] = value
+            return
+        except Exception:
+            pass
+
+    legacy_set = getattr(st, "experimental_set_query_params", None)
+    if callable(legacy_set):
+        legacy_set(**cleaned)
+
+
+def _slugify_text(value: str, fallback: str = "item") -> str:
+    lowered = (value or "").strip().lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", lowered).strip("-")
+    return slug or fallback
+
+
+def _build_entity_ref(entity_id: str, label: str = "") -> str:
+    clean_id = str(entity_id or "").strip()
+    if not clean_id:
+        return ""
+    if not label.strip():
+        return f"{clean_id.split('_')[0]}--{clean_id}"
+    prefix = _slugify_text(label, fallback=clean_id.split("_")[0])
+    return f"{prefix}--{clean_id}"
+
+
+def _extract_entity_id_from_ref(reference: str, prefix: str) -> str:
+    raw = str(reference or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith(f"{prefix}_"):
+        return raw
+    match = re.search(rf"{re.escape(prefix)}_[a-zA-Z0-9]+", raw)
+    if match:
+        return match.group(0)
+    return ""
+
+
+def _apply_url_state_to_session() -> None:
+    query_params = _read_query_params()
+    signature = "&".join(
+        f"{key}={query_params[key]}"
+        for key in sorted(query_params.keys())
+    )
+    if signature == str(st.session_state.get("portal_url_applied_signature", "")):
+        return
+    st.session_state.portal_url_applied_signature = signature
+    if not query_params:
+        return
+
+    mode_value = str(query_params.get("mode", "")).strip().lower()
+    if mode_value in {"technical", "tech"}:
+        st.session_state.portal_experience_mode = "Technical"
+    elif mode_value in {"user", "friendly", "user-friendly", "user_friendly"}:
+        st.session_state.portal_experience_mode = "User Friendly"
+
+    tenant_value = str(
+        query_params.get("tenant")
+        or query_params.get("tenant_id")
+        or ""
+    ).strip()
+    if tenant_value:
+        st.session_state.portal_tenant = tenant_value
+
+    api_value = str(query_params.get("api", "")).strip()
+    if api_value:
+        st.session_state.portal_api_base = api_value
+
+    view_value = str(query_params.get("view", "")).strip().lower()
+    view_map = {
+        "home": "Portal Home",
+        "studio": "Portal Home",
+        "upload": "New Processing Run",
+        "library": "Game Library",
+        "monitor": "Operations Console",
+        "operations": "Operations Console",
+        "run_monitor": "Operations Console",
+        "run-monitor": "Operations Console",
+    }
+    target_nav = view_map.get(view_value, "")
+    if target_nav:
+        if target_nav == "Game Library":
+            st.session_state.portal_experience_mode = "Technical"
+            st.session_state.portal_nav = target_nav
+        elif str(st.session_state.get("portal_experience_mode", "User Friendly")) == "Technical":
+            st.session_state.portal_nav = target_nav
+        else:
+            user_nav_aliases = {
+                "Portal Home": "Studio",
+                "New Processing Run": "Upload",
+                "Operations Console": "Run Monitor",
+            }
+            st.session_state.portal_user_nav_main = user_nav_aliases.get(target_nav, "Studio")
+
+    match_ref = str(query_params.get("match") or query_params.get("match_id") or "").strip()
+    match_id = _extract_entity_id_from_ref(match_ref, "match")
+    if match_id:
+        st.session_state.selected_match_id = match_id
+        if "--" in match_ref:
+            raw_label = match_ref.split("--", 1)[0]
+            if raw_label and raw_label not in {"match", "run", "job"}:
+                st.session_state.selected_match_label = raw_label.replace("-", " ").strip()
+
+    job_ref = str(query_params.get("job") or query_params.get("job_id") or "").strip()
+    job_id = _extract_entity_id_from_ref(job_ref, "job")
+    if job_id:
+        st.session_state.selected_job_id = job_id
+        st.session_state.portal_auto_fetch_job_id = job_id
+
+    seek_ref = str(query_params.get("seek") or "").strip()
+    if seek_ref:
+        try:
+            st.session_state.portal_video_seek_s = max(0, int(float(seek_ref)))
+        except Exception:
+            pass
+
+    bookmark_ref = str(query_params.get("bookmark") or "").strip()
+    if bookmark_ref:
+        st.session_state.portal_deeplink_bookmark = bookmark_ref
+
+
+def _view_code_from_nav(nav_key: str, is_technical: bool) -> str:
+    if nav_key == "New Processing Run":
+        return "upload"
+    if nav_key == "Game Library":
+        return "library"
+    if nav_key == "Operations Console":
+        return "monitor"
+    return "home" if is_technical else "studio"
+
+
+def _build_portal_query_params(
+    mode_code: str,
+    view_code: str,
+    tenant_id: str,
+    match_id: str,
+    match_label: str,
+    job_id: str,
+    seek_s: int,
+    bookmark_ref: str,
+) -> Dict[str, str]:
+    params: Dict[str, str] = {
+        "mode": mode_code,
+        "view": view_code,
+    }
+    tenant_clean = str(tenant_id or "").strip()
+    if tenant_clean:
+        params["tenant"] = tenant_clean
+    match_clean = str(match_id or "").strip()
+    if match_clean:
+        params["match"] = _build_entity_ref(match_clean, match_label)
+    job_clean = str(job_id or "").strip()
+    if job_clean:
+        params["job"] = _build_entity_ref(job_clean, "run")
+    if int(seek_s or 0) > 0:
+        params["seek"] = str(int(seek_s))
+    bookmark_clean = str(bookmark_ref or "").strip()
+    if bookmark_clean:
+        params["bookmark"] = bookmark_clean
+    return params
+
+
+def _build_portal_share_link(params: Dict[str, str]) -> str:
+    encoded = urlencode(params)
+    base_url = str(os.getenv("VH_PORTAL_SHARE_BASE_URL", "")).strip()
+    if base_url:
+        delimiter = "&" if "?" in base_url else "?"
+        return f"{base_url}{delimiter}{encoded}" if encoded else base_url
+    return f"?{encoded}" if encoded else "?"
+
+
+def _bookmark_default_index(
+    labels: List[str],
+    rows_by_label: Dict[str, Dict[str, Any]],
+    bookmark_hint: str,
+) -> int:
+    hint = str(bookmark_hint or "").strip()
+    if not hint:
+        return 0
+    for idx, label in enumerate(labels):
+        row = rows_by_label.get(label) or {}
+        event_id = str(row.get("event_id") or "").strip()
+        if event_id and event_id == hint:
+            return idx
+        if str(row.get("time") or "").strip() == hint:
+            return idx
+        try:
+            if str(int(float(row.get("occurred_s", 0.0)))) == hint:
+                return idx
+        except Exception:
+            continue
+    return 0
+
+
+def _render_match_bookmark_review(
+    *,
+    context_key: str,
+    api_base: str,
+    tenant_id: str,
+    token: str,
+    selected_match: Optional[Dict[str, Any]],
+    selected_match_id: str,
+    jobs: List[Dict[str, Any]],
+    is_technical: bool,
+    mode_code: str,
+    view_code: str,
+) -> None:
+    st.subheader("Bookmark Review")
+    if not selected_match:
+        st.info("Unable to resolve selected match details.")
+        return
+    if not jobs:
+        st.info("Run at least one processing job to populate bookmarks for this match.")
+        return
+
+    selected_match_label = str(selected_match.get("name") or selected_match_id).strip()
+    st.session_state.selected_match_label = selected_match_label
+
+    job_picker = {
+        f"{job['job_id']} | {job.get('status')} | {_iso_to_short(job.get('updated_at'))}": job
+        for job in jobs
+    }
+    labels = list(job_picker.keys())
+    previous_job_id = str(st.session_state.get("selected_job_id", "")).strip()
+    default_job_id = previous_job_id
+    default_index = 0
+    if default_job_id:
+        for idx, label in enumerate(labels):
+            if str(job_picker[label].get("job_id")) == default_job_id:
+                default_index = idx
+                break
+
+    selected_job_label = st.selectbox(
+        "Bookmark Source Job",
+        labels,
+        index=default_index,
+        key=f"{context_key}_review_job",
+    )
+    selected_job = job_picker[selected_job_label]
+    selected_job_id = str(selected_job.get("job_id"))
+    if previous_job_id and selected_job_id != previous_job_id:
+        st.session_state.portal_selected_bookmark_ref = ""
+        st.session_state.portal_deeplink_bookmark = ""
+    st.session_state.selected_job_id = selected_job_id
+
+    review_auto_refresh = st.checkbox(
+        "Auto-refresh bookmarks while job is running",
+        value=True,
+        key=f"{context_key}_review_auto_refresh_{selected_match_id}",
+    )
+    live_payload = list_job_bookmarks(
+        api_base=api_base,
+        tenant_id=tenant_id,
+        token=token,
+        job_id=selected_job_id,
+        limit=2000,
+    )
+    live_source = str(live_payload.get("source", "none"))
+    live_items = list(live_payload.get("items", []))
+    if live_source == "events":
+        bookmark_rows = _build_bookmark_rows(selected_job, live_items)
+    else:
+        bookmark_rows = _bookmark_rows_from_live_items(live_items, source=live_source)
+        if not bookmark_rows:
+            fallback_events = list_match_events(
+                api_base=api_base,
+                tenant_id=tenant_id,
+                token=token,
+                match_id=selected_match_id,
+                job_id=selected_job_id,
+                limit=2000,
+            )
+            bookmark_rows = _build_bookmark_rows(selected_job, fallback_events)
+
+    player_col, table_col = st.columns([1.5, 1.0])
+    with player_col:
+        source_video = _resolve_match_video_source(selected_match)
+        if source_video:
+            seek_default = int(st.session_state.portal_video_seek_s or 0)
+            seek_seconds = st.number_input(
+                "Seek To (seconds)",
+                min_value=0,
+                value=max(0, seek_default),
+                step=1,
+                key=f"{context_key}_seek_seconds_{selected_match_id}",
+            )
+            st.session_state.portal_video_seek_s = int(seek_seconds)
+            st.caption("Playback uses the full source file. Jump to any bookmark and continue watching beyond clip boundaries.")
+            st.video(source_video, start_time=int(seek_seconds))
+        else:
+            st.warning("No playable source video path found on the selected match.")
+
+    with table_col:
+        st.metric("Bookmarks", len(bookmark_rows))
+        st.metric("Detected Events", len([row for row in bookmark_rows if not str(row.get("event_id", "")).startswith("bm_")]))
+        st.caption(f"Bookmark source: `{live_source}`")
+
+        if bookmark_rows:
+            jump_rows = {
+                f"{row['time']} | {row['event_type']} | conf={row['confidence']}": row
+                for row in bookmark_rows
+            }
+            jump_labels = list(jump_rows.keys())
+            jump_default_idx = _bookmark_default_index(
+                labels=jump_labels,
+                rows_by_label=jump_rows,
+                bookmark_hint=str(st.session_state.get("portal_deeplink_bookmark", "")),
+            )
+            jump_label = st.selectbox(
+                "Jump To Bookmark",
+                jump_labels,
+                index=jump_default_idx,
+                key=f"{context_key}_jump_select_{selected_match_id}_{selected_job_id}",
+            )
+            selected_row = jump_rows[jump_label]
+            selected_event_id = str(selected_row.get("event_id") or "").strip()
+            if selected_event_id:
+                st.session_state.portal_selected_bookmark_ref = selected_event_id
+
+            if st.button(
+                "Jump in Full Video",
+                key=f"{context_key}_jump_btn_{selected_match_id}_{selected_job_id}",
+            ):
+                st.session_state.portal_video_seek_s = int(float(selected_row["occurred_s"]))
+                safe_rerun()
+
+            share_params = _build_portal_query_params(
+                mode_code=mode_code,
+                view_code=view_code,
+                tenant_id=tenant_id,
+                match_id=selected_match_id,
+                match_label=selected_match_label,
+                job_id=selected_job_id,
+                seek_s=int(st.session_state.portal_video_seek_s or 0),
+                bookmark_ref="",
+            )
+            bookmark_params = dict(share_params)
+            bookmark_params["seek"] = str(int(float(selected_row.get("occurred_s", 0.0))))
+            if selected_event_id:
+                bookmark_params["bookmark"] = selected_event_id
+
+            st.caption("Share Links")
+            st.code(_build_portal_share_link(share_params), language="text")
+            st.code(_build_portal_share_link(bookmark_params), language="text")
+
+            st.caption("On-demand bookmark clip (frame-accurate extract from source video)")
+            clip_col1, clip_col2 = st.columns(2)
+            clip_pre = clip_col1.slider(
+                "Clip Pre (s)",
+                0.0,
+                20.0,
+                1.5,
+                0.5,
+                key=f"{context_key}_clip_pre",
+            )
+            clip_post = clip_col2.slider(
+                "Clip Post (s)",
+                0.0,
+                30.0,
+                5.0,
+                0.5,
+                key=f"{context_key}_clip_post",
+            )
+            clip_col3, clip_col4 = st.columns(2)
+            clip_anchor = clip_col3.selectbox(
+                "Clip Anchor",
+                ["event_window", "occurred_at"],
+                index=0,
+                key=f"{context_key}_clip_anchor",
+            )
+            clip_audio = clip_col4.checkbox(
+                "Include Audio",
+                value=True,
+                key=f"{context_key}_clip_audio",
+            )
+
+            render_disabled = (not selected_event_id) or selected_event_id.startswith("bm_")
+            if st.button(
+                "Render Clip On Demand",
+                key=f"{context_key}_clip_render_btn",
+                disabled=render_disabled,
+            ):
+                clip_result = api_request(
+                    "POST",
+                    api_base,
+                    f"/matches/{selected_match_id}/events/{selected_event_id}/clip-on-demand",
+                    tenant_id,
+                    token,
+                    json_body={
+                        "pre_seconds": float(clip_pre),
+                        "post_seconds": float(clip_post),
+                        "anchor": clip_anchor,
+                        "include_audio": bool(clip_audio),
+                        "prefer_gpu": True,
+                        "force_rebuild": False,
+                    },
+                    timeout=300,
+                )
+                if not clip_result["ok"]:
+                    st.error(f"Clip generation failed: {clip_result['payload']}")
+                else:
+                    payload = clip_result["payload"]
+                    clip_source = _resolve_clip_playback_source(
+                        path=str(payload.get("path") or ""),
+                        download_url=str(payload.get("download_url") or ""),
+                    )
+                    st.session_state.portal_preview_clip_source = clip_source
+                    st.session_state.portal_preview_clip_summary = payload
+                    reuse_text = "reused cached clip" if payload.get("reused_existing") else "rendered new clip"
+                    st.success(f"Clip ready ({reuse_text}).")
+            if render_disabled:
+                st.caption("Clip render requires persisted event IDs. Re-run newer jobs if this row is bookmark-only.")
+
+            selectable = [
+                row
+                for row in bookmark_rows
+                if str(row.get("event_id", "")).strip() and not str(row.get("event_id", "")).startswith("bm_")
+            ]
+            if selectable:
+                export_options = {
+                    f"{row['time']} | {row['event_type']} | {row['event_id']}": str(row["event_id"])
+                    for row in selectable
+                }
+                selected_export_labels = st.multiselect(
+                    "Select Bookmarks For Highlight Export",
+                    list(export_options.keys()),
+                    key=f"{context_key}_export_selection_{selected_match_id}",
+                )
+                export_title = st.text_input(
+                    "Export Title",
+                    value="Selected Highlights",
+                    key=f"{context_key}_export_title_{selected_match_id}",
+                )
+                export_col1, export_col2 = st.columns(2)
+                export_pre = export_col1.slider(
+                    "Export Pre (s)",
+                    0.0,
+                    20.0,
+                    1.0,
+                    0.5,
+                    key=f"{context_key}_export_pre_{selected_match_id}",
+                )
+                export_post = export_col2.slider(
+                    "Export Post (s)",
+                    0.0,
+                    30.0,
+                    3.0,
+                    0.5,
+                    key=f"{context_key}_export_post_{selected_match_id}",
+                )
+                if st.button(
+                    "Export Highlight Reel From Selected Bookmarks",
+                    key=f"{context_key}_export_btn_{selected_match_id}",
+                    disabled=not selected_export_labels,
+                ):
+                    event_ids = [export_options[label] for label in selected_export_labels]
+                    export_result = api_request(
+                        "POST",
+                        api_base,
+                        f"/matches/{selected_match_id}/exports/highlights",
+                        tenant_id,
+                        token,
+                        json_body={
+                            "event_ids": event_ids,
+                            "pre_seconds": float(export_pre),
+                            "post_seconds": float(export_post),
+                            "anchor": "event_window",
+                            "include_audio": True,
+                            "prefer_gpu": True,
+                            "title": export_title.strip() or "Selected Highlights",
+                        },
+                        timeout=600,
+                    )
+                    if not export_result["ok"]:
+                        st.error(f"Highlight export failed: {export_result['payload']}")
+                    else:
+                        payload = export_result["payload"]
+                        export_source = _resolve_clip_playback_source(
+                            path=str(payload.get("path") or ""),
+                            download_url=str(payload.get("download_url") or ""),
+                        )
+                        st.session_state.portal_export_video_source = export_source
+                        st.session_state.portal_export_summary = payload
+                        st.success("Highlight reel export completed.")
+                if st.session_state.portal_export_video_source:
+                    st.caption("Latest Highlight Export")
+                    st.video(st.session_state.portal_export_video_source)
+                    if is_technical:
+                        st.json(st.session_state.portal_export_summary)
+
+            st.dataframe(bookmark_rows, use_container_width=True, hide_index=True)
+            if st.session_state.portal_preview_clip_source:
+                st.caption("Latest Bookmark Clip")
+                st.video(st.session_state.portal_preview_clip_source)
+                if is_technical:
+                    st.json(st.session_state.portal_preview_clip_summary)
+        else:
+            st.info("No bookmarks available yet for this job. Run worker and refresh.")
+
+    selected_status = str(selected_job.get("status", "")).lower()
+    if review_auto_refresh and selected_status in {"queued", "claimed", "running", "cancel_requested"}:
+        time.sleep(1.5)
+        safe_rerun()
+
+
 if "selected_match_id" not in st.session_state:
     st.session_state.selected_match_id = ""
 if "selected_job_id" not in st.session_state:
     st.session_state.selected_job_id = ""
+if "selected_match_label" not in st.session_state:
+    st.session_state.selected_match_label = ""
 if "portal_video_seek_s" not in st.session_state:
     st.session_state.portal_video_seek_s = 0
 if "portal_preview_clip_source" not in st.session_state:
@@ -609,7 +1165,16 @@ if "portal_pending_nav" not in st.session_state:
     st.session_state.portal_pending_nav = ""
 if "portal_user_nav_main" not in st.session_state:
     st.session_state.portal_user_nav_main = "Studio"
+if "portal_url_applied_signature" not in st.session_state:
+    st.session_state.portal_url_applied_signature = ""
+if "portal_deeplink_bookmark" not in st.session_state:
+    st.session_state.portal_deeplink_bookmark = ""
+if "portal_selected_bookmark_ref" not in st.session_state:
+    st.session_state.portal_selected_bookmark_ref = ""
+if "portal_studio_focus_review" not in st.session_state:
+    st.session_state.portal_studio_focus_review = False
 
+_apply_url_state_to_session()
 
 with st.sidebar:
     st.header("Workspace")
@@ -675,6 +1240,7 @@ else:
     nav_key = nav
 
 monitor_nav_label = "Operations Console" if is_technical else "Run Monitor"
+ops_job_id_for_url = ""
 
 
 _render_portal_header()
@@ -855,13 +1421,25 @@ if nav_key == "Portal Home":
 """,
                         unsafe_allow_html=True,
                     )
-                    action_col1, action_col2 = st.columns(2)
+                    action_col1, action_col2, action_col3 = st.columns(3)
                     if action_col1.button("Open", key=f"studio_open_match_{match_id}"):
                         st.session_state.selected_match_id = match_id
+                        st.session_state.selected_match_label = game_name
+                        st.session_state.portal_studio_focus_review = False
+                        safe_rerun()
+
+                    if action_col2.button("Review", key=f"studio_review_match_{match_id}"):
+                        st.session_state.selected_match_id = match_id
+                        st.session_state.selected_match_label = game_name
+                        latest_job_id = str((latest or {}).get("job_id") or "").strip()
+                        if latest_job_id:
+                            st.session_state.selected_job_id = latest_job_id
+                        st.session_state.portal_studio_focus_review = True
+                        st.session_state.portal_flash_message = "Match selected. Opening Review & Bookmarks."
                         safe_rerun()
 
                     source_video = _resolve_match_video_source(match)
-                    if action_col2.button(
+                    if action_col3.button(
                         "Analyze",
                         key=f"studio_new_run_{match_id}",
                         disabled=not bool(source_video),
@@ -882,7 +1460,9 @@ if nav_key == "Portal Home":
                         else:
                             new_job_id = str(create_result["payload"]["job_id"])
                             st.session_state.selected_match_id = match_id
+                            st.session_state.selected_match_label = game_name
                             st.session_state.selected_job_id = new_job_id
+                            st.session_state.portal_studio_focus_review = False
                             st.session_state.portal_auto_fetch_job_id = new_job_id
                             st.session_state.portal_pending_nav = monitor_nav_label
                             st.session_state.portal_flash_message = f"Analysis queued for {game_name} ({new_job_id})."
@@ -909,6 +1489,8 @@ if nav_key == "Portal Home":
             selected_match_id = str(selector[selected_label])
             st.session_state.selected_match_id = selected_match_id
             selected_match = next((m for m, _ in filtered_snapshots if str(m.get("match_id")) == selected_match_id), None)
+            if selected_match:
+                st.session_state.selected_match_label = str(selected_match.get("name") or selected_match_id)
             jobs = list_match_jobs(api_base, tenant_id, token, selected_match_id, limit=200)
 
             if selected_match:
@@ -916,6 +1498,32 @@ if nav_key == "Portal Home":
                 workspace_tabs = st.tabs(["Overview", "Live Analysis", "Runs", "Exports"])
                 latest_job = _latest_job(jobs)
                 source_video = _resolve_match_video_source(selected_match)
+
+                if bool(st.session_state.portal_studio_focus_review):
+                    st.subheader("Review & Bookmarks")
+                    review_col1, review_col2 = st.columns([1.3, 1.0])
+                    review_col1.caption("Direct review mode. Jump bookmarks, render clips, and export without nested tabs.")
+                    if review_col2.button(
+                        "Close Review Mode",
+                        key=f"studio_review_close_{selected_match_id}",
+                        use_container_width=True,
+                    ):
+                        st.session_state.portal_studio_focus_review = False
+                        safe_rerun()
+
+                    _render_match_bookmark_review(
+                        context_key="studio_review_focus",
+                        api_base=api_base,
+                        tenant_id=tenant_id,
+                        token=token,
+                        selected_match=selected_match,
+                        selected_match_id=selected_match_id,
+                        jobs=jobs,
+                        is_technical=is_technical,
+                        mode_code="technical" if is_technical else "user",
+                        view_code="studio",
+                    )
+                    st.divider()
 
                 with workspace_tabs[0]:
                     ov_col1, ov_col2, ov_col3, ov_col4 = st.columns(4)
@@ -934,7 +1542,7 @@ if nav_key == "Portal Home":
                     ov_col3.metric("Latest Status", str((latest_job or {}).get("status", "no_runs")))
                     ov_col4.metric("Latest Bookmarks", int((latest_job or {}).get("result", {}).get("bookmarks_count", 0) or 0))
 
-                    action_col1, action_col2 = st.columns(2)
+                    action_col1, action_col2, action_col3 = st.columns(3)
                     if action_col1.button(
                         "Start New Analysis For This Match",
                         key=f"studio_workspace_start_{selected_match_id}",
@@ -957,6 +1565,7 @@ if nav_key == "Portal Home":
                         else:
                             new_job_id = str(create_result["payload"]["job_id"])
                             st.session_state.selected_job_id = new_job_id
+                            st.session_state.portal_studio_focus_review = False
                             st.session_state.portal_auto_fetch_job_id = new_job_id
                             st.session_state.portal_pending_nav = monitor_nav_label
                             st.session_state.portal_flash_message = f"Analysis queued. job_id={new_job_id}"
@@ -967,6 +1576,14 @@ if nav_key == "Portal Home":
                         use_container_width=True,
                     ):
                         st.session_state.portal_pending_nav = monitor_nav_label
+                        safe_rerun()
+                    if action_col3.button(
+                        "Open Review & Bookmarks",
+                        key=f"studio_workspace_review_{selected_match_id}",
+                        use_container_width=True,
+                        disabled=not bool(jobs),
+                    ):
+                        st.session_state.portal_studio_focus_review = True
                         safe_rerun()
 
                     if source_video:
@@ -1168,7 +1785,6 @@ if nav_key == "Portal Home":
                     else:
                         st.caption("No highlight exports yet for this match.")
 
-
 elif nav_key == "New Processing Run":
     st.subheader("Launch Processing")
     mode = st.radio("Run Type", ["Upload New Game", "Rerun Existing Game"], horizontal=True, key="portal_run_mode")
@@ -1338,6 +1954,7 @@ elif nav_key == "New Processing Run":
                         else:
                             job_id = job_result["payload"]["job_id"]
                             st.session_state.selected_match_id = match_id
+                            st.session_state.selected_match_label = str(match_name or match_id)
                             st.session_state.selected_job_id = job_id
                             st.session_state.portal_auto_fetch_job_id = job_id
                             st.session_state.portal_pending_nav = monitor_nav_label
@@ -1349,9 +1966,11 @@ elif nav_key == "New Processing Run":
         if not matches:
             st.warning("No games available yet. Upload a new game first.")
         else:
+            match_lookup = {str(m.get("match_id")): m for m in matches}
             match_options = {f"{m.get('name') or m['match_id']} ({m['match_id']})": m["match_id"] for m in matches}
             selected_label = st.selectbox("Choose Game", list(match_options.keys()), key="portal_rerun_match_select")
             match_id = match_options[selected_label]
+            selected_match_obj = match_lookup.get(str(match_id)) or {}
             jobs = list_match_jobs(api_base, tenant_id, token, match_id, limit=200)
             if not jobs:
                 st.warning("Selected game has no processing jobs yet.")
@@ -1425,6 +2044,7 @@ elif nav_key == "New Processing Run":
                     else:
                         rerun_job_id = rerun_result["payload"]["job_id"]
                         st.session_state.selected_match_id = match_id
+                        st.session_state.selected_match_label = str(selected_match_obj.get("name") or match_id)
                         st.session_state.selected_job_id = rerun_job_id
                         st.session_state.portal_auto_fetch_job_id = rerun_job_id
                         st.session_state.portal_pending_nav = monitor_nav_label
@@ -1514,6 +2134,8 @@ elif nav_key == "Game Library":
         st.session_state.selected_match_id = selected_match_id
         jobs = match_jobs_cache.get(selected_match_id, [])
         selected_match = next((item for item in matches if item.get("match_id") == selected_match_id), None)
+        if selected_match:
+            st.session_state.selected_match_label = str(selected_match.get("name") or selected_match_id)
 
         st.subheader("Match Workspace")
         if not selected_match:
@@ -1933,234 +2555,18 @@ elif nav_key == "Game Library":
                         st.write("Result")
                         st.json(job.get("result", {}))
 
-        st.subheader("Full Match Review")
-        if not selected_match:
-            st.info("Unable to resolve selected match details.")
-        elif not jobs:
-            st.info("Run at least one processing job to populate bookmarks for this match.")
-        else:
-            job_picker = {
-                f"{job['job_id']} | {job.get('status')} | {_iso_to_short(job.get('updated_at'))}": job for job in jobs
-            }
-            labels = list(job_picker.keys())
-            default_job_id = st.session_state.selected_job_id
-            default_index = 0
-            if default_job_id:
-                for idx, label in enumerate(labels):
-                    if job_picker[label]["job_id"] == default_job_id:
-                        default_index = idx
-                        break
-            selected_job_label = st.selectbox(
-                "Bookmark Source Job",
-                labels,
-                index=default_index,
-                key="portal_library_review_job",
-            )
-            selected_job = job_picker[selected_job_label]
-            st.session_state.selected_job_id = selected_job["job_id"]
-
-            review_auto_refresh = st.checkbox(
-                "Auto-refresh bookmarks while job is running",
-                value=True,
-                key=f"portal_review_auto_refresh_{selected_match_id}",
-            )
-            live_payload = list_job_bookmarks(
-                api_base=api_base,
-                tenant_id=tenant_id,
-                token=token,
-                job_id=selected_job["job_id"],
-                limit=2000,
-            )
-            live_source = str(live_payload.get("source", "none"))
-            live_items = list(live_payload.get("items", []))
-            if live_source == "events":
-                bookmark_rows = _build_bookmark_rows(selected_job, live_items)
-            else:
-                bookmark_rows = _bookmark_rows_from_live_items(live_items, source=live_source)
-                if not bookmark_rows:
-                    fallback_events = list_match_events(
-                        api_base=api_base,
-                        tenant_id=tenant_id,
-                        token=token,
-                        match_id=selected_match_id,
-                        job_id=selected_job["job_id"],
-                        limit=2000,
-                    )
-                    bookmark_rows = _build_bookmark_rows(selected_job, fallback_events)
-
-            player_col, table_col = st.columns([1.5, 1.0])
-            with player_col:
-                source_video = _resolve_match_video_source(selected_match)
-                if source_video:
-                    seek_default = int(st.session_state.portal_video_seek_s or 0)
-                    seek_seconds = st.number_input(
-                        "Seek To (seconds)",
-                        min_value=0,
-                        value=max(0, seek_default),
-                        step=1,
-                        key="portal_library_seek_seconds",
-                    )
-                    st.session_state.portal_video_seek_s = int(seek_seconds)
-                    st.caption("Playback uses the full source file. Jump to any bookmark and continue watching beyond clip boundaries.")
-                    st.video(source_video, start_time=int(seek_seconds))
-                else:
-                    st.warning("No playable source video path found on the selected match.")
-
-            with table_col:
-                st.metric("Bookmarks", len(bookmark_rows))
-                st.metric("Detected Events", len([row for row in bookmark_rows if not str(row.get("event_id", "")).startswith("bm_")]))
-                st.caption(f"Bookmark source: `{live_source}`")
-                if bookmark_rows:
-                    jump_rows = {
-                        f"{row['time']} | {row['event_type']} | conf={row['confidence']}": row for row in bookmark_rows
-                    }
-                    jump_label = st.selectbox(
-                        "Jump To Bookmark",
-                        list(jump_rows.keys()),
-                        key="portal_library_jump_select",
-                    )
-                    selected_row = jump_rows[jump_label]
-                    if st.button("Jump in Full Video", key="portal_library_jump_btn"):
-                        st.session_state.portal_video_seek_s = int(float(selected_row["occurred_s"]))
-                        safe_rerun()
-
-                    st.caption("On-demand bookmark clip (frame-accurate extract from source video)")
-                    clip_col1, clip_col2 = st.columns(2)
-                    clip_pre = clip_col1.slider("Clip Pre (s)", 0.0, 20.0, 1.5, 0.5, key="portal_clip_pre")
-                    clip_post = clip_col2.slider("Clip Post (s)", 0.0, 30.0, 5.0, 0.5, key="portal_clip_post")
-                    clip_col3, clip_col4 = st.columns(2)
-                    clip_anchor = clip_col3.selectbox(
-                        "Clip Anchor",
-                        ["event_window", "occurred_at"],
-                        index=0,
-                        key="portal_clip_anchor",
-                    )
-                    clip_audio = clip_col4.checkbox("Include Audio", value=True, key="portal_clip_audio")
-
-                    selected_event_id = str(selected_row.get("event_id") or "").strip()
-                    render_disabled = (not selected_event_id) or selected_event_id.startswith("bm_")
-                    if st.button("Render Clip On Demand", key="portal_clip_render_btn", disabled=render_disabled):
-                        clip_result = api_request(
-                            "POST",
-                            api_base,
-                            f"/matches/{selected_match_id}/events/{selected_event_id}/clip-on-demand",
-                            tenant_id,
-                            token,
-                            json_body={
-                                "pre_seconds": float(clip_pre),
-                                "post_seconds": float(clip_post),
-                                "anchor": clip_anchor,
-                                "include_audio": bool(clip_audio),
-                                "prefer_gpu": True,
-                                "force_rebuild": False,
-                            },
-                            timeout=300,
-                        )
-                        if not clip_result["ok"]:
-                            st.error(f"Clip generation failed: {clip_result['payload']}")
-                        else:
-                            payload = clip_result["payload"]
-                            clip_source = _resolve_clip_playback_source(
-                                path=str(payload.get("path") or ""),
-                                download_url=str(payload.get("download_url") or ""),
-                            )
-                            st.session_state.portal_preview_clip_source = clip_source
-                            st.session_state.portal_preview_clip_summary = payload
-                            reuse_text = "reused cached clip" if payload.get("reused_existing") else "rendered new clip"
-                            st.success(f"Clip ready ({reuse_text}).")
-                    if render_disabled:
-                        st.caption("Clip render requires persisted event IDs. Re-run newer jobs if this row is bookmark-only.")
-
-                    selectable = [
-                        row
-                        for row in bookmark_rows
-                        if str(row.get("event_id", "")).strip() and not str(row.get("event_id", "")).startswith("bm_")
-                    ]
-                    if selectable:
-                        export_options = {
-                            f"{row['time']} | {row['event_type']} | {row['event_id']}": str(row["event_id"])
-                            for row in selectable
-                        }
-                        selected_export_labels = st.multiselect(
-                            "Select Bookmarks For Highlight Export",
-                            list(export_options.keys()),
-                            key=f"portal_export_selection_{selected_match_id}",
-                        )
-                        export_title = st.text_input(
-                            "Export Title",
-                            value="Selected Highlights",
-                            key=f"portal_export_title_{selected_match_id}",
-                        )
-                        export_col1, export_col2 = st.columns(2)
-                        export_pre = export_col1.slider(
-                            "Export Pre (s)",
-                            0.0,
-                            20.0,
-                            1.0,
-                            0.5,
-                            key=f"portal_export_pre_{selected_match_id}",
-                        )
-                        export_post = export_col2.slider(
-                            "Export Post (s)",
-                            0.0,
-                            30.0,
-                            3.0,
-                            0.5,
-                            key=f"portal_export_post_{selected_match_id}",
-                        )
-                        if st.button(
-                            "Export Highlight Reel From Selected Bookmarks",
-                            key=f"portal_export_btn_{selected_match_id}",
-                            disabled=not selected_export_labels,
-                        ):
-                            event_ids = [export_options[label] for label in selected_export_labels]
-                            export_result = api_request(
-                                "POST",
-                                api_base,
-                                f"/matches/{selected_match_id}/exports/highlights",
-                                tenant_id,
-                                token,
-                                json_body={
-                                    "event_ids": event_ids,
-                                    "pre_seconds": float(export_pre),
-                                    "post_seconds": float(export_post),
-                                    "anchor": "event_window",
-                                    "include_audio": True,
-                                    "prefer_gpu": True,
-                                    "title": export_title.strip() or "Selected Highlights",
-                                },
-                                timeout=600,
-                            )
-                            if not export_result["ok"]:
-                                st.error(f"Highlight export failed: {export_result['payload']}")
-                            else:
-                                payload = export_result["payload"]
-                                export_source = _resolve_clip_playback_source(
-                                    path=str(payload.get("path") or ""),
-                                    download_url=str(payload.get("download_url") or ""),
-                                )
-                                st.session_state.portal_export_video_source = export_source
-                                st.session_state.portal_export_summary = payload
-                                st.success("Highlight reel export completed.")
-                        if st.session_state.portal_export_video_source:
-                            st.caption("Latest Highlight Export")
-                            st.video(st.session_state.portal_export_video_source)
-                            if is_technical:
-                                st.json(st.session_state.portal_export_summary)
-
-                    st.dataframe(bookmark_rows, use_container_width=True, hide_index=True)
-                    if st.session_state.portal_preview_clip_source:
-                        st.caption("Latest Bookmark Clip")
-                        st.video(st.session_state.portal_preview_clip_source)
-                        if is_technical:
-                            st.json(st.session_state.portal_preview_clip_summary)
-                else:
-                    st.info("No bookmarks available yet for this job. Run worker and refresh.")
-
-            selected_status = str(selected_job.get("status", "")).lower()
-            if review_auto_refresh and selected_status in {"queued", "claimed", "running", "cancel_requested"}:
-                time.sleep(1.5)
-                safe_rerun()
+        _render_match_bookmark_review(
+            context_key="library_review",
+            api_base=api_base,
+            tenant_id=tenant_id,
+            token=token,
+            selected_match=selected_match,
+            selected_match_id=selected_match_id,
+            jobs=jobs,
+            is_technical=is_technical,
+            mode_code="technical" if is_technical else "user",
+            view_code="library",
+        )
 else:
     if is_technical:
         st.subheader("Operations Console")
@@ -2174,6 +2580,7 @@ else:
     if auto_target_job and not str(st.session_state.get("portal_ops_job_id", "")).strip():
         st.session_state.portal_ops_job_id = auto_target_job
     job_id_input = st.text_input("Job ID", value=default_job, key="portal_ops_job_id")
+    ops_job_id_for_url = str(job_id_input or "").strip()
     auto_refresh = st.checkbox(
         "Auto-refresh selected job while active",
         value=True,
@@ -2402,3 +2809,25 @@ else:
                     items = list(log_result["payload"].get("items", []))
                     st.write(f"Log rows: {len(items)}")
                     st.dataframe(items, use_container_width=True, hide_index=True)
+
+current_mode_code = "technical" if is_technical else "user"
+current_view_code = _view_code_from_nav(nav_key=nav_key, is_technical=is_technical)
+selected_match_id_for_url = str(st.session_state.get("selected_match_id", "")).strip()
+selected_match_label_for_url = str(st.session_state.get("selected_match_label", "")).strip()
+selected_job_id_for_url = str(ops_job_id_for_url or st.session_state.get("selected_job_id", "")).strip()
+seek_for_url = int(st.session_state.get("portal_video_seek_s", 0) or 0)
+bookmark_for_url = str(st.session_state.get("portal_selected_bookmark_ref", "")).strip()
+if current_view_code not in {"studio", "library"} or not selected_job_id_for_url:
+    bookmark_for_url = ""
+
+portal_query_params = _build_portal_query_params(
+    mode_code=current_mode_code,
+    view_code=current_view_code,
+    tenant_id=tenant_id,
+    match_id=selected_match_id_for_url,
+    match_label=selected_match_label_for_url,
+    job_id=selected_job_id_for_url,
+    seek_s=seek_for_url,
+    bookmark_ref=bookmark_for_url,
+)
+_write_query_params(portal_query_params)
