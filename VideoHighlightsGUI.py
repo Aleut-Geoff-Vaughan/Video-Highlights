@@ -96,6 +96,8 @@ class VideoHighlightsGUI:
         self.min_clip = tk.StringVar(value="4.0")
         self.speed_sensitivity = tk.StringVar(value="2.0")
         self.audio_sensitivity = tk.StringVar(value="2.0")
+        self.camera_mode = tk.StringVar(value="wide")
+        self.zoom_factor = tk.StringVar(value="1.6")
         self.select_player = tk.BooleanVar(value=False)
         self.overlay = tk.BooleanVar(value=False)
         self.no_audio = tk.BooleanVar(value=False)
@@ -234,6 +236,23 @@ class VideoHighlightsGUI:
         ttk.Label(main_frame, text="Audio sensitivity:").grid(row=row, column=0, sticky=tk.W, pady=5)
         ttk.Entry(main_frame, textvariable=self.audio_sensitivity, width=10).grid(row=row, column=1, sticky=tk.W, pady=5)
         ttk.Label(main_frame, text="(lower = more sensitive, default: 2.0)", foreground="gray").grid(row=row, column=2, sticky=tk.W, padx=(5, 0))
+        row += 1
+
+        ttk.Label(main_frame, text="Camera mode:").grid(row=row, column=0, sticky=tk.W, pady=5)
+        camera_mode_combo = ttk.Combobox(
+            main_frame,
+            textvariable=self.camera_mode,
+            values=("wide", "follow_action", "follow_player"),
+            state="readonly",
+            width=18,
+        )
+        camera_mode_combo.grid(row=row, column=1, sticky=tk.W, pady=5)
+        ttk.Label(main_frame, text="(wide keeps full frame; follow modes crop to the tracked player)", foreground="gray").grid(row=row, column=2, sticky=tk.W, padx=(5, 0))
+        row += 1
+
+        ttk.Label(main_frame, text="Zoom factor:").grid(row=row, column=0, sticky=tk.W, pady=5)
+        ttk.Entry(main_frame, textvariable=self.zoom_factor, width=10).grid(row=row, column=1, sticky=tk.W, pady=5)
+        ttk.Label(main_frame, text="(used by follow camera modes, e.g. 1.6)", foreground="gray").grid(row=row, column=2, sticky=tk.W, padx=(5, 0))
         row += 1
 
         # Separator
@@ -419,6 +438,8 @@ class VideoHighlightsGUI:
             'min_clip_duration': float(self.min_clip.get()),
             'no_audio': self.no_audio.get(),
             'overlay': self.overlay.get(),
+            'camera_mode': self.camera_mode.get(),
+            'zoom_factor': float(self.zoom_factor.get()),
             'trim_start': trim_start,
             'trim_end': trim_end,
             'threads': None,  # Auto-detect

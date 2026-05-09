@@ -88,6 +88,8 @@ def _sync_job_events_from_manifest(
         session.delete(item)
 
     detector_version = str(config.get("model_version") or "event-v0")
+    follow_cam_mode = str(config.get("camera_mode") or "wide").strip().lower()
+    follow_cam_zoom = float(config.get("zoom_factor", 1.6) or 1.6)
     source_asset_id = _primary_source_asset_id(match)
     created = 0
     for bookmark in bookmarks:
@@ -118,6 +120,7 @@ def _sync_job_events_from_manifest(
             "source_asset_id": source_asset_id,
             "bookmark_id": bookmark.get("bookmark_id"),
             "analysis_manifest_path": str(Path(config.get("output_dir") or os.path.join(settings.output_root, job.id)).resolve() / "analysis_bookmarks.json"),
+            "tracking_manifest_path": str(Path(config.get("output_dir") or os.path.join(settings.output_root, job.id)).resolve() / "analysis_tracking.json"),
         }
 
         event = Event(
@@ -138,6 +141,9 @@ def _sync_job_events_from_manifest(
             source_json={
                 "detector": "videohighlights-multi-factor",
                 "detector_version": detector_version,
+                "follow_cam_version": "follow-cam-v0" if follow_cam_mode != "wide" else None,
+                "camera_mode": follow_cam_mode,
+                "zoom_factor": follow_cam_zoom,
                 "bookmark_label": bookmark.get("label"),
                 "sources": bookmark.get("sources", []),
             },
@@ -390,6 +396,9 @@ class JobRunner:
                 focus_event_types=list(config.get("focus_event_types", []) or []),
                 model_version=str(config.get("model_version")) if config.get("model_version") else None,
                 analysis_only=bool(config.get("analysis_only", False)),
+                camera_mode=str(config.get("camera_mode") or "wide"),
+                zoom_factor=float(config.get("zoom_factor", 1.6)),
+                player_roi=dict(config.get("player_roi") or {}) if isinstance(config.get("player_roi"), dict) else None,
             )
 
             artifacts = sorted(str(path.resolve()) for path in Path(output_dir).glob("*.mp4"))
@@ -406,6 +415,7 @@ class JobRunner:
                 "bookmarks_count": len(bookmarks),
                 "bookmarks": bookmarks,
                 "analysis_manifest_path": str((Path(output_dir) / "analysis_bookmarks.json").resolve()),
+                "tracking_manifest_path": str((Path(output_dir) / "analysis_tracking.json").resolve()),
                 "analysis_table_csv_path": str((Path(output_dir) / "analysis_bookmarks.csv").resolve()),
             }
 

@@ -48,6 +48,10 @@ This file tracks concrete implementation progress against the documented V1 arch
 21. Added run deletion endpoint (`DELETE /v1/jobs/{job_id}`) with linked job-log and event cleanup.
 22. Added selected-bookmark highlight export endpoint (`POST /v1/matches/{match_id}/exports/highlights`).
 23. Added user-friendly experience mode with top-level workflow nav and match-centered run management.
+24. Added player ROI selection plumbing from portal/API job config into the YOLO tracking pipeline.
+25. Added follow-cam clip rendering modes (`wide`, `follow_player`, `follow_action`) with zoom controls.
+26. Added `analysis_tracking.json` manifests and event evidence links so on-demand clips and exports can reuse tracking.
+27. Fixed follow-cam timestamp alignment for trimmed processing runs.
 
 ## LLM + feedback loop scaffolding
 
@@ -56,6 +60,8 @@ This file tracks concrete implementation progress against the documented V1 arch
 3. Added structured feedback submission/review endpoints.
 4. Added feedback batch and training-run endpoints with retraining pipeline scaffolding.
 5. Enforced review-role restrictions on approval flows.
+6. Added OpenAI-compatible and Ollama/local provider paths for match-assistant responses.
+7. Added portal match-assistant UI for match summaries, missed-moment review prompts, coaching notes, and selected-event explanations.
 
 ## Storage foundation
 
@@ -81,15 +87,17 @@ This file tracks concrete implementation progress against the documented V1 arch
 14. Added multitenant isolation and admin API integration tests.
 15. Added debug/test run scripts for quick Docker shutdown (`stop_docker.bat`, `stop_docker.sh`).
 16. Rebuilt `app.py` into a SaaS-style processing portal with dashboards, announcements, game library, rerun flows, and operations console.
+17. Polished the Streamlit portal visual system with a cleaner operations-studio header, flatter cards, tighter metrics, safer HTML escaping, and follow-cam mode visibility across run summaries.
 
 ## Validated
 
-1. `python -m compileall backend` succeeds.
+1. `python -m compileall app.py VideoHighlights.py backend` succeeds.
 2. `python test_api_smoke.py` passes end-to-end for core API flow.
 3. `python test_api_auth_queue.py` passes for auth-required + queue-worker execution mode.
-4. `python -m pytest --cov=backend --cov-report=term-missing` passes locally.
-5. Current automated test suite: 33 passing tests, backend coverage at 77%.
+4. `python -m pytest --basetemp .pytest_tmp` passes locally.
+5. Current automated test suite: 49 passing tests.
 6. Multitenant + admin test paths pass in local pytest run.
+7. `python -m streamlit run app.py --server.headless true --server.port 8501 --browser.gatherUsageStats false` starts the portal locally.
 
 ## Next Implementation Batch (Autonomous Queue)
 

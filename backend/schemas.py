@@ -132,6 +132,8 @@ class EventSource(BaseModel):
     detector_version: Optional[str] = None
     tracker_version: Optional[str] = None
     follow_cam_version: Optional[str] = None
+    camera_mode: Optional[str] = None
+    zoom_factor: Optional[float] = None
 
 
 class EventLocation(BaseModel):
@@ -145,6 +147,9 @@ class EventEvidence(BaseModel):
     follow_cam_asset_id: Optional[str] = None
     evidence_clip_asset_id: Optional[str] = None
     thumbnail_asset_id: Optional[str] = None
+    analysis_manifest_path: Optional[str] = None
+    tracking_manifest_path: Optional[str] = None
+    bookmark_id: Optional[str] = None
 
 
 class EventUpsert(BaseModel):

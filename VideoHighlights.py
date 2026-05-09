@@ -62,6 +62,13 @@ import numpy as np
 import cv2
 from tqdm import tqdm
 
+from backend.services.follow_cam import render_follow_cam_clip
+from backend.services.player_focus import (
+    choose_target_track_id,
+    resolve_player_roi_box,
+    stitch_target_track,
+)
+
 # YOLOv8 API
 from ultralytics import YOLO
 
@@ -84,6 +91,10 @@ except ImportError:
 class TrackPoint:
     t: float  # seconds
     xy: Tuple[float, float]  # center x,y in pixels
+    bbox: Optional[Tuple[float, float, float, float]] = None
+
+
+FOLLOW_CAM_MODES = {"wide", "follow_player", "follow_action"}
 
 
 def ensure_dir(p: str):
@@ -375,9 +386,32 @@ def write_analysis_bookmark_files(
     return json_path, csv_path
 
 
-def track_video(video_path: str, fps_hint: Optional[float] = None, select_roi: bool = False) -> Tuple[Dict[int, List[TrackPoint]], List[TrackPoint], float, Tuple[int,int]]:
+def write_tracking_manifest(
+    output_dir: str,
+    payload: Dict[str, object],
+) -> str:
+    tracking_path = os.path.join(output_dir, "analysis_tracking.json")
+    with open(tracking_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+    return tracking_path
+
+
+def track_video(
+    video_path: str,
+    fps_hint: Optional[float] = None,
+    select_roi: bool = False,
+    player_roi: Optional[Dict[str, float]] = None,
+) -> Tuple[Dict[int, List[TrackPoint]], List[TrackPoint], float, Tuple[int, int], Dict[str, object]]:
     """Run YOLO + ByteTrack, return per-ID trajectory, ball trajectory, FPS, and frame size.
-    Returns: (tracks, ball_trajectory, fps, (W,H)) where tracks[id] = [TrackPoint, ...], ball_trajectory = [TrackPoint, ...]
+    Returns:
+        (
+            tracks,
+            ball_trajectory,
+            fps,
+            (W,H),
+            selection_metadata,
+        )
+        where tracks[id] = [TrackPoint, ...], ball_trajectory = [TrackPoint, ...]
     """
     # Prepare first frame (for selection)
     cap = cv2.VideoCapture(video_path)
@@ -391,7 +425,11 @@ def track_video(video_path: str, fps_hint: Optional[float] = None, select_roi: b
     H, W = first.shape[:2]
 
     user_box = None  # [x1,y1,x2,y2]
-    if select_roi:
+    if player_roi:
+        resolved_box = resolve_player_roi_box(player_roi, W, H)
+        if resolved_box is not None:
+            user_box = np.array(resolved_box, dtype=np.float32)
+    elif select_roi:
         # OpenCV ROI returns (x,y,w,h)
         roi = cv2.selectROI("Select your player", first, showCrosshair=True, fromCenter=False)
         cv2.destroyWindow("Select your player")
@@ -427,9 +465,21 @@ def track_video(video_path: str, fps_hint: Optional[float] = None, select_roi: b
             cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
 
             if c == 0:  # person
-                tracks.setdefault(track_id, []).append(TrackPoint(t=t, xy=(float(cx), float(cy))))
+                tracks.setdefault(track_id, []).append(
+                    TrackPoint(
+                        t=t,
+                        xy=(float(cx), float(cy)),
+                        bbox=(float(x1), float(y1), float(x2), float(y2)),
+                    )
+                )
             elif c == 32:  # sports ball
-                ball_trajectory.append(TrackPoint(t=t, xy=(float(cx), float(cy))))
+                ball_trajectory.append(
+                    TrackPoint(
+                        t=t,
+                        xy=(float(cx), float(cy)),
+                        bbox=(float(x1), float(y1), float(x2), float(y2)),
+                    )
+                )
 
     # Choose target ID
     target_id = None
@@ -438,27 +488,8 @@ def track_video(video_path: str, fps_hint: Optional[float] = None, select_roi: b
         raise RuntimeError("No player tracks detected in video. Ensure the video contains visible people.")
 
     if user_box is not None:
-        # Pick ID whose early boxes overlap the user's box best within first 3 seconds
-        best_iou = -1.0
-        window_t = 3.0
-        for tid, traj in tracks.items():
-            # Find the earliest point within window
-            early = [p for p in traj if p.t <= window_t]
-            if not early:
-                continue
-            # approximate bbox as a small box around center (fallback if precise boxes unavailable)
-            # We'll instead estimate IoU via distance: smaller distance -> higher pseudo IoU
-            cxs = np.array([p.xy[0] for p in early])
-            cys = np.array([p.xy[1] for p in early])
-            cx, cy = np.mean(cxs), np.mean(cys)
-            # distance to user box center
-            ux = (user_box[0] + user_box[2]) / 2.0
-            uy = (user_box[1] + user_box[3]) / 2.0
-            dist = math.hypot(cx - ux, cy - uy) + 1e-3
-            pseudo_iou = 1.0 / dist
-            if pseudo_iou > best_iou:
-                best_iou = pseudo_iou
-                target_id = tid
+        # Pick ID whose early detections overlap the selected ROI best within the opening seconds.
+        target_id = choose_target_track_id(tracks, tuple(float(v) for v in user_box), window_t=3.0)
 
         if target_id is None:
             # Fallback if no tracks match the user selection
@@ -471,8 +502,28 @@ def track_video(video_path: str, fps_hint: Optional[float] = None, select_roi: b
     if target_id is None:
         raise RuntimeError("No player track found. Try using --select on the first frame.")
 
+    stitched_track_ids, stitched_traj = stitch_target_track(tracks, int(target_id))
+    if not stitched_traj:
+        stitched_track_ids = [int(target_id)]
+        stitched_traj = list(tracks[int(target_id)])
+    if len(stitched_track_ids) > 1:
+        print(
+            "[info] Re-identified selected player across tracker IDs: "
+            + " -> ".join(str(track_id) for track_id in stitched_track_ids)
+        )
+
     print(f"[info] Tracked {len(ball_trajectory)} ball detections across video")
-    return {target_id: tracks[target_id]}, ball_trajectory, fps, (W, H)
+    return (
+        {int(target_id): stitched_traj},
+        ball_trajectory,
+        fps,
+        (W, H),
+        {
+            "target_track_id": int(target_id),
+            "stitched_track_ids": stitched_track_ids,
+            "stitched_track_count": len(stitched_track_ids),
+        },
+    )
 
 
 def compute_speed_series(traj: List[TrackPoint], fps: float) -> Tuple[np.ndarray, np.ndarray]:
@@ -868,6 +919,121 @@ def write_subclips(video_path: str, intervals: List[Tuple[float, float]], out_di
     return paths
 
 
+def _trajectory_to_samples(traj: List[TrackPoint], time_offset_seconds: float = 0.0) -> List[Tuple[float, float, float]]:
+    return [
+        (float(point.t + time_offset_seconds), float(point.xy[0]), float(point.xy[1]))
+        for point in traj
+    ]
+
+
+def _trajectory_to_manifest_points(
+    traj: List[TrackPoint],
+    trim_offset: float = 0.0,
+) -> List[Dict[str, float]]:
+    rows: List[Dict[str, float]] = []
+    for point in traj:
+        item: Dict[str, float] = {
+            "t": round(float(point.t + trim_offset), 3),
+            "x": round(float(point.xy[0]), 3),
+            "y": round(float(point.xy[1]), 3),
+        }
+        if point.bbox is not None:
+            item.update(
+                {
+                    "x1": round(float(point.bbox[0]), 3),
+                    "y1": round(float(point.bbox[1]), 3),
+                    "x2": round(float(point.bbox[2]), 3),
+                    "y2": round(float(point.bbox[3]), 3),
+                }
+            )
+        rows.append(item)
+    return rows
+
+
+def write_single_follow_cam_subclip(
+    video_path: str,
+    interval: Tuple[float, float],
+    clip_num: int,
+    out_dir: str,
+    player_traj: List[TrackPoint],
+    ball_traj: List[TrackPoint],
+    camera_mode: str = "follow_action",
+    zoom_factor: float = 1.6,
+    track_time_offset_seconds: float = 0.0,
+) -> Optional[str]:
+    s, e = interval
+    out_path = os.path.join(out_dir, f"highlight_{clip_num:02d}.mp4")
+    ball_weight = 0.35 if camera_mode == "follow_action" else 0.0
+    try:
+        return render_follow_cam_clip(
+            video_path=video_path,
+            output_path=out_path,
+            start_seconds=s,
+            end_seconds=e,
+            player_track=_trajectory_to_samples(player_traj, time_offset_seconds=track_time_offset_seconds),
+            ball_track=_trajectory_to_samples(ball_traj, time_offset_seconds=track_time_offset_seconds),
+            zoom_factor=zoom_factor,
+            ball_weight=ball_weight,
+            smooth_factor=0.24,
+            include_audio=True,
+        )
+    except Exception as ex:
+        print(f"[warn] Failed to write follow-cam clip {clip_num} ({s:.1f}s - {e:.1f}s): {ex}")
+        return None
+
+
+def write_follow_cam_subclips(
+    video_path: str,
+    intervals: List[Tuple[float, float]],
+    out_dir: str,
+    player_traj: List[TrackPoint],
+    ball_traj: List[TrackPoint],
+    camera_mode: str = "follow_action",
+    zoom_factor: float = 1.6,
+    max_workers: Optional[int] = None,
+    track_time_offset_seconds: float = 0.0,
+) -> List[str]:
+    if max_workers is None:
+        max_workers = max(1, min(3, int(multiprocessing.cpu_count() * 0.33)))
+    else:
+        max_workers = max(1, min(int(max_workers), 4))
+
+    print(f"[follow-cam] Writing {len(intervals)} clips using {max_workers} parallel workers")
+    print(f"[follow-cam] Camera mode: {camera_mode} | Zoom factor: {zoom_factor:.2f}x")
+
+    paths = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_clip = {
+            executor.submit(
+                write_single_follow_cam_subclip,
+                video_path,
+                interval,
+                k,
+                out_dir,
+                player_traj,
+                ball_traj,
+                camera_mode,
+                zoom_factor,
+                track_time_offset_seconds,
+            ): k
+            for k, interval in enumerate(intervals, start=1)
+        }
+
+        with tqdm(total=len(intervals), desc="Writing follow-cam clips", unit="clip") as pbar:
+            for future in as_completed(future_to_clip):
+                clip_num = future_to_clip[future]
+                try:
+                    result = future.result()
+                    if result:
+                        paths.append(result)
+                except Exception as exc:
+                    print(f"[warn] Follow-cam clip {clip_num} generated an exception: {exc}")
+                pbar.update(1)
+
+    paths.sort()
+    return paths
+
+
 def draw_single_spotlight_overlay(video_path: str, traj: List[TrackPoint], interval: Tuple[float, float],
                                    clip_num: int, out_dir: str, radius: int = 35) -> Optional[str]:
     """Draw spotlight overlay for a single clip (used for parallel processing)"""
@@ -1000,6 +1166,9 @@ def process_video_highlights(
     focus_event_types: Optional[List[str]] = None,
     model_version: Optional[str] = None,
     analysis_only: bool = False,
+    camera_mode: str = "wide",
+    zoom_factor: float = 1.6,
+    player_roi: Optional[Dict[str, float]] = None,
 ) -> bool:
     """
     Core video highlights processing function.
@@ -1021,6 +1190,9 @@ def process_video_highlights(
         focus_event_types: Optional event targets to bias tuning and record run intent
         model_version: Optional model version label for run traceability
         analysis_only: Run analysis/bookmark generation without writing highlight clips
+        camera_mode: wide | follow_player | follow_action
+        zoom_factor: Crop zoom level for follow-cam modes
+        player_roi: Optional normalized/pixel ROI used to lock onto one player without an interactive popup
 
     Returns:
         True if processing succeeded, False otherwise
@@ -1049,6 +1221,12 @@ def process_video_highlights(
         print(f"Error: Path is not a file: {video_path}")
         return False
 
+    camera_mode = str(camera_mode or "wide").strip().lower()
+    if camera_mode not in FOLLOW_CAM_MODES:
+        print(f"Error: Unsupported camera_mode '{camera_mode}'. Valid options: {', '.join(sorted(FOLLOW_CAM_MODES))}")
+        return False
+    zoom_factor = max(1.0, float(zoom_factor or 1.0))
+
     # Print configuration
     print(f"\nProcessing video: {video_path}")
     print(f"Output directory: {output_dir}")
@@ -1075,6 +1253,10 @@ def process_video_highlights(
     print(f"Pre-event buffer: {pre_seconds}s")
     print(f"Post-event buffer: {post_seconds}s")
     print(f"Manual selection: {'Yes' if select_player else 'No'}")
+    print(f"Configured player ROI: {'Yes' if player_roi else 'No'}")
+    print(f"Camera mode: {camera_mode}")
+    if camera_mode != "wide":
+        print(f"Zoom factor: {zoom_factor:.2f}x")
     print(f"Spotlight overlay: {'Yes' if overlay else 'No'}")
     print(f"Analysis-only mode: {'Yes' if analysis_only else 'No'}")
     print()
@@ -1087,8 +1269,12 @@ def process_video_highlights(
         processing_video, trim_offset = create_trimmed_video(video_path, output_dir, trim_start, trim_end)
 
         print("[1/5] Tracking players and ball (YOLO + ByteTrack)...")
-        tracks, ball_traj, fps, (W, H) = track_video(processing_video, select_roi=select_player)
-        target_id = list(tracks.keys())[0]
+        tracks, ball_traj, fps, (W, H), selection_metadata = track_video(
+            processing_video,
+            select_roi=select_player,
+            player_roi=player_roi,
+        )
+        target_id = int(selection_metadata.get("target_track_id") or list(tracks.keys())[0])
         traj = tracks[target_id]
 
         print("[2/5] Computing multi-factor highlights (speed + ball proximity + direction changes)...")
@@ -1148,6 +1334,37 @@ def process_video_highlights(
         if trim_offset > 0:
             print(f"[info] Found {len(intervals)} highlights. Adjusting timestamps to original video (offset: +{format_time(trim_offset)})")
 
+        tracking_manifest = {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "source_video_path": original_video,
+            "processing_video_path": processing_video,
+            "output_dir": output_dir,
+            "trim_offset_seconds": round(trim_offset, 3),
+            "camera": {
+                "mode": camera_mode,
+                "zoom_factor": round(zoom_factor, 3),
+            },
+            "selection": {
+                "manual_select_popup": bool(select_player),
+                "player_roi": dict(player_roi or {}),
+                "stitched_track_ids": list(selection_metadata.get("stitched_track_ids") or [int(target_id)]),
+                "stitched_track_count": int(selection_metadata.get("stitched_track_count") or 1),
+            },
+            "video": {
+                "fps": round(float(fps), 3),
+                "frame_width": int(W),
+                "frame_height": int(H),
+            },
+            "tracking": {
+                "target_track_id": int(target_id),
+                "target_track_ids": list(selection_metadata.get("stitched_track_ids") or [int(target_id)]),
+                "target_track": _trajectory_to_manifest_points(traj, trim_offset=trim_offset),
+                "ball_track": _trajectory_to_manifest_points(ball_traj, trim_offset=trim_offset),
+            },
+        }
+        tracking_manifest_path = write_tracking_manifest(output_dir, tracking_manifest)
+        print(f"[analysis] Tracking manifest: {tracking_manifest_path}")
+
         live_manifest_path = os.path.join(output_dir, "analysis_bookmarks.json")
         live_manifest_context: Dict[str, object] = {
             "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -1158,12 +1375,15 @@ def process_video_highlights(
             "model_version": model_version,
             "focus_event_types": requested_targets,
             "trim_offset_seconds": round(trim_offset, 3),
+            "tracking_manifest_path": tracking_manifest_path,
             "settings": {
                 "pre_seconds": pre_seconds,
                 "post_seconds": post_seconds,
                 "min_clip_duration": min_clip_duration,
                 "speed_sensitivity": speed_sensitivity,
                 "audio_sensitivity": audio_sensitivity,
+                "camera_mode": camera_mode,
+                "zoom_factor": round(zoom_factor, 3),
                 "no_audio": no_audio,
                 "overlay": overlay,
                 "threads": threads,
@@ -1207,7 +1427,20 @@ def process_video_highlights(
             return True
 
         print("[5/5] Writing subclips...")
-        clip_paths = write_subclips(original_video, original_intervals, output_dir, max_workers=threads)
+        if camera_mode == "wide":
+            clip_paths = write_subclips(original_video, original_intervals, output_dir, max_workers=threads)
+        else:
+            clip_paths = write_follow_cam_subclips(
+                original_video,
+                original_intervals,
+                output_dir,
+                traj,
+                ball_traj,
+                camera_mode=camera_mode,
+                zoom_factor=zoom_factor,
+                max_workers=threads,
+                track_time_offset_seconds=trim_offset,
+            )
 
         # Montage
         if clip_paths:
@@ -1255,6 +1488,8 @@ def main():
     ap.add_argument("--speed-sensitivity", type=float, default=2.0, help="Speed detection sensitivity (lower = more sensitive, default: 2.0, old default was 3.0)")
     ap.add_argument("--audio-sensitivity", type=float, default=2.0, help="Audio peak detection sensitivity (lower = more sensitive, default: 2.0, old default was 3.0)")
     ap.add_argument("--analysis-only", action="store_true", help="Run detection/bookmark analysis without writing highlight clips")
+    ap.add_argument("--camera-mode", choices=sorted(FOLLOW_CAM_MODES), default="wide", help="Video framing mode for rendered clips")
+    ap.add_argument("--zoom-factor", type=float, default=1.6, help="Zoom factor for follow_player/follow_action camera modes")
     args = ap.parse_args()
 
     # Interactive mode if video or output not provided
@@ -1357,6 +1592,8 @@ def main():
         speed_sensitivity=args.speed_sensitivity,
         audio_sensitivity=args.audio_sensitivity,
         analysis_only=args.analysis_only,
+        camera_mode=args.camera_mode,
+        zoom_factor=args.zoom_factor,
     )
 
     if not success:

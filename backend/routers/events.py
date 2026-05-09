@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from sqlmodel import Session, select
@@ -23,6 +24,7 @@ from ..schemas import (
 )
 from ..serializers import event_to_read
 from ..services.event_clip_renderer import concat_clips_ffmpeg, render_clip_ffmpeg
+from ..services.follow_cam import render_follow_cam_clip
 from ..services.storage import get_storage_backend
 from ..tenant import TenantContext, get_tenant_context
 from ..utils import decode_cursor, encode_cursor, ensure_dir, generate_id, utcnow
@@ -98,6 +100,109 @@ def _resolve_source_video_path(match: Match) -> str:
         if path:
             return path
     return ""
+
+
+def _read_json_file(path: str) -> Dict[str, object]:
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if isinstance(payload, dict):
+            return payload
+    except Exception:
+        return {}
+    return {}
+
+
+def _resolve_tracking_manifest(event: Event) -> Dict[str, object]:
+    evidence = dict(event.evidence_json or {})
+    tracking_manifest_path = str(evidence.get("tracking_manifest_path", "")).strip()
+    if tracking_manifest_path:
+        return _read_json_file(tracking_manifest_path)
+
+    analysis_manifest_path = str(evidence.get("analysis_manifest_path", "")).strip()
+    manifest = _read_json_file(analysis_manifest_path)
+    nested_tracking_manifest_path = str(manifest.get("tracking_manifest_path", "")).strip()
+    if nested_tracking_manifest_path:
+        return _read_json_file(nested_tracking_manifest_path)
+    legacy_tracking = manifest.get("tracking")
+    if isinstance(legacy_tracking, dict):
+        return manifest
+    return {}
+
+
+def _manifest_track_to_samples(points: object) -> List[Tuple[float, float, float]]:
+    if not isinstance(points, list):
+        return []
+    samples: List[Tuple[float, float, float]] = []
+    for item in points:
+        if not isinstance(item, dict):
+            continue
+        try:
+            samples.append((float(item["t"]), float(item["x"]), float(item["y"])))
+        except Exception:
+            continue
+    return samples
+
+
+def _resolve_follow_cam_profile(event: Event) -> Tuple[str, float, List[Tuple[float, float, float]], List[Tuple[float, float, float]]]:
+    source = dict(event.source_json or {})
+    manifest = _resolve_tracking_manifest(event)
+    camera = manifest.get("camera", {}) if isinstance(manifest.get("camera", {}), dict) else {}
+    tracking = manifest.get("tracking", {}) if isinstance(manifest.get("tracking", {}), dict) else {}
+
+    mode = str(source.get("camera_mode") or camera.get("mode") or "wide").strip().lower()
+    if mode not in {"follow_action", "follow_player"}:
+        return "wide", 1.0, [], []
+
+    try:
+        zoom_factor = float(source.get("zoom_factor") or camera.get("zoom_factor") or 1.6)
+    except Exception:
+        zoom_factor = 1.6
+
+    player_track = _manifest_track_to_samples(tracking.get("target_track"))
+    if not player_track:
+        return "wide", zoom_factor, [], []
+    ball_track = _manifest_track_to_samples(tracking.get("ball_track"))
+    return mode, max(1.0, zoom_factor), player_track, ball_track
+
+
+def _render_window_clip(
+    *,
+    source_video: str,
+    event: Event,
+    output_path: str,
+    start_seconds: float,
+    end_seconds: float,
+    include_audio: bool,
+    prefer_gpu: bool,
+) -> Tuple[str, float]:
+    camera_mode, zoom_factor, player_track, ball_track = _resolve_follow_cam_profile(event)
+    if camera_mode != "wide" and player_track:
+        ball_weight = 0.35 if camera_mode == "follow_action" else 0.0
+        render_follow_cam_clip(
+            video_path=source_video,
+            output_path=output_path,
+            start_seconds=start_seconds,
+            end_seconds=end_seconds,
+            player_track=player_track,
+            ball_track=ball_track,
+            zoom_factor=zoom_factor,
+            ball_weight=ball_weight,
+            include_audio=include_audio,
+        )
+        return camera_mode, zoom_factor
+
+    render_clip_ffmpeg(
+        video_path=source_video,
+        output_path=output_path,
+        start_seconds=start_seconds,
+        end_seconds=end_seconds,
+        include_audio=include_audio,
+        prefer_gpu=prefer_gpu,
+    )
+    return "wide", 1.0
 
 
 @router.get("/matches/{match_id}/events", response_model=Dict[str, object])
@@ -180,9 +285,10 @@ def render_event_clip_on_demand(
         raise HTTPException(status_code=400, detail=f"Source video path not found: {source_video}")
 
     start_ms, end_ms = _clip_window_ms(event, payload)
+    effective_camera_mode, effective_zoom_factor, _, _ = _resolve_follow_cam_profile(event)
     signature = (
         f"{event.id}:{start_ms}:{end_ms}:{int(payload.include_audio)}:"
-        f"{int(payload.prefer_gpu)}:{payload.anchor}"
+        f"{int(payload.prefer_gpu)}:{payload.anchor}:{effective_camera_mode}:{effective_zoom_factor:.2f}"
     )
 
     storage = get_storage_backend()
@@ -211,8 +317,9 @@ def render_event_clip_on_demand(
     temp_filename = f"{event_id}_{start_ms}_{end_ms}_{'a' if payload.include_audio else 'na'}.mp4"
     temp_path = os.path.join(temp_dir, temp_filename)
     try:
-        render_clip_ffmpeg(
-            video_path=source_video,
+        effective_camera_mode, effective_zoom_factor = _render_window_clip(
+            source_video=source_video,
+            event=event,
             output_path=temp_path,
             start_seconds=start_s,
             end_seconds=end_s,
@@ -259,6 +366,8 @@ def render_event_clip_on_demand(
         "duration_ms": max(1, end_ms - start_ms),
         "include_audio": payload.include_audio,
         "anchor": payload.anchor,
+        "camera_mode": effective_camera_mode,
+        "zoom_factor": effective_zoom_factor,
         "created_at": created_at,
     }
     assets.append(asset_entry)
@@ -330,8 +439,9 @@ def export_selected_highlights(
         for index, event in enumerate(events, start=1):
             start_ms, end_ms = _clip_window_ms(event, clip_payload)
             clip_path = os.path.join(temp_root, f"part_{index:04d}.mp4")
-            render_clip_ffmpeg(
-                video_path=source_video,
+            _render_window_clip(
+                source_video=source_video,
+                event=event,
                 output_path=clip_path,
                 start_seconds=float(start_ms) / 1000.0,
                 end_seconds=float(end_ms) / 1000.0,

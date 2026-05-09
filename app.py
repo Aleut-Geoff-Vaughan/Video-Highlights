@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import os
 import re
+from html import escape
+import tempfile
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -68,56 +70,192 @@ st.markdown(
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Source+Sans+3:wght@400;600;700&display=swap');
 
 :root {
-  --bg: #f4f6f8;
+  --bg: #eef2f4;
   --panel: #ffffff;
-  --ink: #12202b;
-  --muted: #5c7182;
-  --brand: #0c6e86;
-  --brand-2: #16a15d;
-  --warn: #c87317;
-  --danger: #b53333;
-  --line: #d8e1e8;
+  --panel-soft: #f7f9fa;
+  --ink: #151f29;
+  --muted: #5f6f7a;
+  --brand: #0a6774;
+  --brand-2: #28754c;
+  --warn: #a86500;
+  --danger: #a33a3a;
+  --line: #d7e0e5;
+  --line-strong: #b8c6ce;
 }
 
 html, body, [class*="css"] {
   font-family: "Source Sans 3", sans-serif;
+  color: var(--ink);
 }
 
 .stApp {
-  background:
-    radial-gradient(1100px 500px at 95% -5%, #d8eef4 0%, rgba(216,238,244,0) 55%),
-    radial-gradient(900px 420px at -10% 2%, #e4f4ea 0%, rgba(228,244,234,0) 50%),
-    var(--bg);
+  background: var(--bg);
 }
 
-.portal-hero {
-  border: 1px solid var(--line);
-  border-radius: 16px;
-  padding: 1.2rem 1.4rem;
-  background: linear-gradient(130deg, #0f5162 0%, #14495a 55%, #134333 100%);
-  color: #f2f8fb;
-  box-shadow: 0 10px 28px rgba(18, 32, 43, 0.14);
+.block-container {
+  padding-top: 1.35rem;
+  padding-bottom: 2rem;
+  max-width: 1500px;
 }
 
-.portal-hero h1 {
-  margin: 0 0 .3rem 0;
+[data-testid="stSidebar"] {
+  background: #111a22;
+  border-right: 1px solid #25323c;
+}
+
+[data-testid="stSidebar"] * {
+  color: #edf4f7;
+}
+
+[data-testid="stSidebar"] input,
+[data-testid="stSidebar"] textarea {
+  color: var(--ink) !important;
+}
+
+[data-testid="stSidebar"] [data-baseweb="select"] * {
+  color: var(--ink) !important;
+}
+
+[data-testid="stSidebar"] [role="radiogroup"] * {
+  color: #edf4f7 !important;
+}
+
+[data-testid="stSidebar"] .stCaption,
+[data-testid="stSidebar"] small {
+  color: #aebbc3 !important;
+}
+
+h1, h2, h3, h4 {
   font-family: "Space Grotesk", sans-serif;
-  font-size: 1.9rem;
-  line-height: 1.2;
+  letter-spacing: 0;
 }
 
-.portal-hero p {
+h2, h3 {
+  color: var(--ink);
+}
+
+div[data-testid="stMetric"] {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: .75rem .85rem;
+  box-shadow: 0 1px 2px rgba(21, 31, 41, 0.05);
+}
+
+div[data-testid="stMetric"] label {
+  color: var(--muted);
+}
+
+.stTabs [data-baseweb="tab-list"] {
+  gap: .25rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.stTabs [data-baseweb="tab"] {
+  border-radius: 6px 6px 0 0;
+  padding: .45rem .75rem;
+}
+
+.stTabs [aria-selected="true"] {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-bottom-color: var(--panel);
+}
+
+.stButton > button,
+.stDownloadButton > button {
+  border-radius: 6px;
+  border: 1px solid var(--line-strong);
+  background: var(--panel);
+  color: var(--ink);
+  box-shadow: 0 1px 2px rgba(21, 31, 41, 0.06);
+}
+
+.stButton > button:hover,
+.stDownloadButton > button:hover {
+  border-color: var(--brand);
+  color: var(--brand);
+}
+
+.stButton > button[kind="primary"] {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #ffffff;
+}
+
+input, textarea, [data-baseweb="select"] > div {
+  border-radius: 6px !important;
+}
+
+[data-testid="stFileUploader"] section {
+  border-radius: 8px;
+  border: 1px dashed var(--line-strong);
+  background: var(--panel-soft);
+}
+
+.portal-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: .15rem 0 .85rem 0;
+  margin-bottom: .35rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.portal-header h1 {
   margin: 0;
-  color: #d9ebf1;
-  font-size: 1rem;
+  font-size: 1.75rem;
+  line-height: 1.1;
+  color: var(--ink);
+}
+
+.portal-header p {
+  margin: .3rem 0 0 0;
+  color: var(--muted);
+  font-size: .96rem;
+}
+
+.portal-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: .4rem;
+  color: var(--brand);
+  font-size: .82rem;
+  font-weight: 700;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+
+.portal-statusbar {
+  display: flex;
+  align-items: center;
+  gap: .45rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  color: var(--muted);
+  font-size: .84rem;
+}
+
+.portal-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.55rem;
+  padding: .18rem .55rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--muted);
+  white-space: nowrap;
 }
 
 .tile {
   border: 1px solid var(--line);
   background: var(--panel);
-  border-radius: 14px;
+  border-radius: 8px;
   padding: .9rem 1rem;
-  min-height: 110px;
+  min-height: 96px;
+  box-shadow: 0 1px 2px rgba(21, 31, 41, 0.05);
 }
 
 .tile h4 {
@@ -134,12 +272,12 @@ html, body, [class*="css"] {
 }
 
 .announce {
-  border-left: 4px solid var(--brand);
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-left: 4px solid var(--brand);
+  border-radius: 8px;
   padding: .65rem .8rem;
   margin: .35rem 0;
-  background: #ffffff;
+  background: var(--panel);
 }
 
 .announce b {
@@ -149,7 +287,7 @@ html, body, [class*="css"] {
 .transaction-pill {
   display: inline-block;
   border: 1px solid var(--line);
-  border-radius: 999px;
+  border-radius: 6px;
   padding: .18rem .55rem;
   margin: 0 .2rem .35rem 0;
   font-size: .8rem;
@@ -177,11 +315,11 @@ html, body, [class*="css"] {
 
 .studio-card {
   border: 1px solid var(--line);
-  background: linear-gradient(180deg, #ffffff 0%, #f9fcfd 100%);
-  border-radius: 14px;
-  padding: .8rem .9rem;
-  min-height: 190px;
-  box-shadow: 0 4px 12px rgba(18, 32, 43, 0.06);
+  background: var(--panel);
+  border-radius: 8px;
+  padding: .85rem .9rem;
+  min-height: 172px;
+  box-shadow: 0 1px 3px rgba(21, 31, 41, 0.07);
 }
 
 .studio-card h4 {
@@ -201,7 +339,7 @@ html, body, [class*="css"] {
   display: inline-block;
   margin: 0 .35rem .35rem 0;
   padding: .12rem .5rem;
-  border-radius: 999px;
+  border-radius: 6px;
   font-size: .76rem;
   border: 1px solid var(--line);
   color: var(--muted);
@@ -224,6 +362,17 @@ html, body, [class*="css"] {
   border-color: #bd4141;
   color: #7f2424;
   background: #fcecec;
+}
+
+@media (max-width: 900px) {
+  .portal-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .portal-statusbar {
+    justify-content: flex-start;
+  }
 }
 </style>
 """,
@@ -380,6 +529,162 @@ def _resolve_match_video_source(match: Dict[str, Any]) -> str:
     return ""
 
 
+def _extract_first_frame_payload(video_path: str) -> Dict[str, Any]:
+    try:
+        import cv2  # type: ignore
+    except Exception:
+        return {}
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        return {}
+    try:
+        ok, frame = cap.read()
+    finally:
+        cap.release()
+    if not ok or frame is None:
+        return {}
+
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    height, width = frame_rgb.shape[:2]
+    return {"image_rgb": frame_rgb, "frame_width": int(width), "frame_height": int(height)}
+
+
+@st.cache_data(show_spinner=False)
+def _extract_first_frame_from_video_path(video_path: str) -> Dict[str, Any]:
+    if not video_path or not os.path.exists(video_path):
+        return {}
+    return _extract_first_frame_payload(video_path)
+
+
+@st.cache_data(show_spinner=False)
+def _extract_first_frame_from_video_bytes(video_bytes: bytes, suffix: str) -> Dict[str, Any]:
+    if not video_bytes:
+        return {}
+
+    temp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix or ".mp4") as handle:
+            handle.write(video_bytes)
+            temp_path = handle.name
+        return _extract_first_frame_payload(temp_path)
+    except Exception:
+        return {}
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+
+
+def _draw_roi_overlay(
+    image_rgb: Any,
+    x1_norm: float,
+    y1_norm: float,
+    x2_norm: float,
+    y2_norm: float,
+) -> Any:
+    preview = image_rgb.copy()
+    height, width = preview.shape[:2]
+    x1 = int(round(width * x1_norm))
+    x2 = int(round(width * x2_norm))
+    y1 = int(round(height * y1_norm))
+    y2 = int(round(height * y2_norm))
+    border = max(2, min(width, height) // 120)
+    color = [255, 170, 0]
+
+    preview[max(0, y1 - border) : min(height, y1 + border), max(0, x1) : min(width, x2)] = color
+    preview[max(0, y2 - border) : min(height, y2 + border), max(0, x1) : min(width, x2)] = color
+    preview[max(0, y1) : min(height, y2), max(0, x1 - border) : min(width, x1 + border)] = color
+    preview[max(0, y1) : min(height, y2), max(0, x2 - border) : min(width, x2 + border)] = color
+    return preview
+
+
+def _render_player_roi_selector(
+    *,
+    context_key: str,
+    default_enabled: bool,
+    existing_roi: Optional[Dict[str, Any]] = None,
+    source_video_path: str = "",
+    upload_bytes: Optional[bytes] = None,
+    upload_name: str = "",
+) -> Dict[str, Any]:
+    enabled = st.checkbox(
+        "Lock onto a player ROI for tracking and follow-cam",
+        value=default_enabled,
+        key=f"{context_key}_player_roi_enabled",
+        help="Use the first-frame box below to keep analysis focused on one player instead of auto-selecting a long-lived track.",
+    )
+    if not enabled:
+        return {"enabled": False, "roi": None}
+
+    suffix = os.path.splitext(upload_name or source_video_path or "preview.mp4")[1] or ".mp4"
+    preview_payload: Dict[str, Any] = {}
+    if upload_bytes:
+        preview_payload = _extract_first_frame_from_video_bytes(upload_bytes, suffix)
+    elif source_video_path:
+        preview_payload = _extract_first_frame_from_video_path(source_video_path)
+
+    if not preview_payload:
+        st.warning("Could not extract the first frame for player selection. Uncheck ROI lock or use a readable local source video.")
+        return {"enabled": True, "roi": None}
+
+    image_rgb = preview_payload["image_rgb"]
+    existing = existing_roi or {}
+    x1_default = int(round(float(existing.get("x1_norm", 0.35)) * 100))
+    y1_default = int(round(float(existing.get("y1_norm", 0.25)) * 100))
+    x2_default = int(round(float(existing.get("x2_norm", 0.45)) * 100))
+    y2_default = int(round(float(existing.get("y2_norm", 0.75)) * 100))
+    x1_default = min(max(0, x1_default), 98)
+    y1_default = min(max(0, y1_default), 98)
+    x2_default = min(max(x1_default + 1, x2_default), 100)
+    y2_default = min(max(y1_default + 1, y2_default), 100)
+
+    x1_key = f"{context_key}_player_roi_x1"
+    y1_key = f"{context_key}_player_roi_y1"
+    x2_key = f"{context_key}_player_roi_x2"
+    y2_key = f"{context_key}_player_roi_y2"
+    st.session_state.setdefault(x1_key, x1_default)
+    st.session_state.setdefault(y1_key, y1_default)
+    st.session_state.setdefault(x2_key, x2_default)
+    st.session_state.setdefault(y2_key, y2_default)
+
+    st.session_state[x1_key] = min(max(int(st.session_state[x1_key]), 0), 98)
+    st.session_state[y1_key] = min(max(int(st.session_state[y1_key]), 0), 98)
+    st.session_state[x2_key] = min(max(int(st.session_state[x2_key]), st.session_state[x1_key] + 1), 100)
+    st.session_state[y2_key] = min(max(int(st.session_state[y2_key]), st.session_state[y1_key] + 1), 100)
+
+    roi_col1, roi_col2 = st.columns([1.5, 1.0])
+    with roi_col1:
+        preview_image = _draw_roi_overlay(
+            image_rgb,
+            st.session_state[x1_key] / 100.0,
+            st.session_state[y1_key] / 100.0,
+            st.session_state[x2_key] / 100.0,
+            st.session_state[y2_key] / 100.0,
+        )
+        st.image(preview_image, caption="First-frame player lock preview", use_container_width=True)
+    with roi_col2:
+        x1_pct = st.slider("Left %", 0, 98, int(st.session_state[x1_key]), 1, key=x1_key)
+        y1_pct = st.slider("Top %", 0, 98, int(st.session_state[y1_key]), 1, key=y1_key)
+        x2_pct = st.slider("Right %", x1_pct + 1, 100, max(int(st.session_state[x2_key]), x1_pct + 1), 1, key=x2_key)
+        y2_pct = st.slider("Bottom %", y1_pct + 1, 100, max(int(st.session_state[y2_key]), y1_pct + 1), 1, key=y2_key)
+        st.caption(
+            f"Frame size: `{preview_payload['frame_width']}x{preview_payload['frame_height']}` | "
+            f"ROI: `{x1_pct}%,{y1_pct}%` to `{x2_pct}%,{y2_pct}%`"
+        )
+
+    roi = {
+        "normalized": True,
+        "x1_norm": round(x1_pct / 100.0, 4),
+        "y1_norm": round(y1_pct / 100.0, 4),
+        "x2_norm": round(x2_pct / 100.0, 4),
+        "y2_norm": round(y2_pct / 100.0, 4),
+    }
+    return {"enabled": True, "roi": roi}
+
+
 def _resolve_clip_playback_source(path: str, download_url: str) -> str:
     raw_url = str(download_url or "").strip()
     if raw_url.lower().startswith("http://") or raw_url.lower().startswith("https://"):
@@ -517,10 +822,10 @@ def _build_stage_tracker(current_stage: Optional[str], status: Optional[str]) ->
             classes.append("done")
         elif item == stage:
             classes.append("active")
-        chips.append(f"<span class=\"{' '.join(classes)}\">{item}</span>")
+        chips.append(f"<span class=\"{' '.join(classes)}\">{_h(item)}</span>")
 
     if stat in {"failed", "canceled", "cancel_requested"}:
-        chips.append(f"<span class=\"transaction-pill fail\">{stat}</span>")
+        chips.append(f"<span class=\"transaction-pill fail\">{_h(stat)}</span>")
     return "".join(chips)
 
 
@@ -558,6 +863,8 @@ def _recommended_job_config() -> Dict[str, Any]:
         "min_clip_duration": 4.0,
         "speed_sensitivity": 2.0,
         "audio_sensitivity": 2.0,
+        "camera_mode": "wide",
+        "zoom_factor": 1.6,
         "overlay": False,
         "no_audio": False,
         "require_gpu": False,
@@ -568,9 +875,16 @@ def _recommended_job_config() -> Dict[str, Any]:
 def _render_portal_header() -> None:
     st.markdown(
         """
-<div class="portal-hero">
-  <h1>Video Highlights Command Portal</h1>
-  <p>Operate ingest, processing, reruns, and diagnostics from a single production-style surface.</p>
+<div class="portal-header">
+  <div>
+    <div class="portal-kicker">Video Highlights</div>
+    <h1>Match Operations Studio</h1>
+    <p>Ingest, analysis, review, exports, and run diagnostics.</p>
+  </div>
+  <div class="portal-statusbar">
+    <span class="portal-chip">Tenant workspace</span>
+    <span class="portal-chip">API connected on demand</span>
+  </div>
 </div>
 """,
         unsafe_allow_html=True,
@@ -585,6 +899,10 @@ def safe_rerun() -> None:
     legacy_fn = getattr(st, "experimental_rerun", None)
     if callable(legacy_fn):
         legacy_fn()
+
+
+def _h(value: Any) -> str:
+    return escape(str(value or ""), quote=True)
 
 
 def _flatten_query_value(value: Any) -> str:
@@ -1139,6 +1457,123 @@ def _render_match_bookmark_review(
         safe_rerun()
 
 
+def _render_match_assistant(
+    *,
+    api_base: str,
+    tenant_id: str,
+    token: str,
+    selected_match_id: str,
+) -> None:
+    st.subheader("Match Assistant")
+    st.caption("Use the configured LLM provider to summarize the match or explain a selected detected event.")
+
+    query_key = f"assistant_query_{selected_match_id}"
+    if query_key not in st.session_state:
+        st.session_state[query_key] = "Summarize key events and likely missing high-impact moments."
+
+    preset_cols = st.columns(3)
+    if preset_cols[0].button("Summary Prompt", key=f"assistant_preset_summary_{selected_match_id}", use_container_width=True):
+        st.session_state[query_key] = "Summarize the match, the strongest detected moments, and the overall event pattern."
+    if preset_cols[1].button("Missed Moments", key=f"assistant_preset_missed_{selected_match_id}", use_container_width=True):
+        st.session_state[query_key] = "Based on the detected event timeline, what likely high-impact moments or review areas should I inspect manually?"
+    if preset_cols[2].button("Coaching Notes", key=f"assistant_preset_coach_{selected_match_id}", use_container_width=True):
+        st.session_state[query_key] = "Turn this event timeline into short coaching notes with caveats about uncertainty."
+
+    question = st.text_area(
+        "Match Question",
+        value=str(st.session_state.get(query_key, "")),
+        height=120,
+        key=query_key,
+    )
+    if st.button("Analyze Match", key=f"assistant_query_btn_{selected_match_id}", use_container_width=True):
+        result = api_request(
+            "POST",
+            api_base,
+            f"/matches/{selected_match_id}/agent/query",
+            tenant_id,
+            token,
+            json_body={"query": question, "include_event_limit": 100},
+            timeout=120,
+        )
+        if not result["ok"]:
+            st.error(f"Assistant query failed: {result['payload']}")
+        else:
+            st.session_state[f"assistant_query_result_{selected_match_id}"] = result["payload"]
+
+    query_result = st.session_state.get(f"assistant_query_result_{selected_match_id}", {})
+    if query_result:
+        st.caption(
+            f"Provider: `{query_result.get('provider', 'fallback')}` | Model: `{query_result.get('model') or '-'}'"
+        )
+        st.write(str(query_result.get("answer") or ""))
+        referenced = list(query_result.get("referenced_event_ids", []) or [])
+        if referenced:
+            st.caption(f"Referenced events: `{len(referenced)}`")
+
+    st.divider()
+
+    selected_event_id = str(st.session_state.get("portal_selected_bookmark_ref", "")).strip()
+    explain_disabled = (not selected_event_id) or selected_event_id.startswith("bm_")
+    if explain_disabled:
+        st.caption("Pick a detected event in Review & Bookmarks to enable event explanation.")
+    else:
+        st.caption(f"Selected event: `{selected_event_id}`")
+
+    explain_key = f"assistant_explain_{selected_match_id}"
+    if explain_key not in st.session_state:
+        st.session_state[explain_key] = "Explain why this event was detected and note any confidence caveats."
+
+    explain_preset_cols = st.columns(2)
+    if explain_preset_cols[0].button(
+        "Why Detected?",
+        key=f"assistant_explain_preset_reason_{selected_match_id}",
+        use_container_width=True,
+        disabled=explain_disabled,
+    ):
+        st.session_state[explain_key] = "Explain why this event was detected and note any confidence caveats."
+    if explain_preset_cols[1].button(
+        "False Positive Risk",
+        key=f"assistant_explain_preset_risk_{selected_match_id}",
+        use_container_width=True,
+        disabled=explain_disabled,
+    ):
+        st.session_state[explain_key] = "Does this look like a possible false positive based on the available signals? Explain why."
+
+    explain_question = st.text_area(
+        "Event Question",
+        value=str(st.session_state.get(explain_key, "")),
+        height=100,
+        key=explain_key,
+        disabled=explain_disabled,
+    )
+    if st.button(
+        "Explain Selected Event",
+        key=f"assistant_explain_btn_{selected_match_id}",
+        use_container_width=True,
+        disabled=explain_disabled,
+    ):
+        result = api_request(
+            "POST",
+            api_base,
+            f"/matches/{selected_match_id}/agent/explain/{selected_event_id}",
+            tenant_id,
+            token,
+            json_body={"question": explain_question},
+            timeout=120,
+        )
+        if not result["ok"]:
+            st.error(f"Event explanation failed: {result['payload']}")
+        else:
+            st.session_state[f"assistant_explain_result_{selected_match_id}"] = result["payload"]
+
+    explain_result = st.session_state.get(f"assistant_explain_result_{selected_match_id}", {})
+    if explain_result:
+        st.caption(
+            f"Provider: `{explain_result.get('provider', 'fallback')}` | Model: `{explain_result.get('model') or '-'}'"
+        )
+        st.write(str(explain_result.get("answer") or ""))
+
+
 if "selected_match_id" not in st.session_state:
     st.session_state.selected_match_id = ""
 if "selected_job_id" not in st.session_state:
@@ -1310,7 +1745,7 @@ if nav_key == "Portal Home":
         st.subheader("Announcements")
         for note in ANNOUNCEMENTS:
             st.markdown(
-                f"<div class='announce'><b>{note['title']}</b><br/>{note['message']}</div>",
+                f"<div class='announce'><b>{_h(note['title'])}</b><br/>{_h(note['message'])}</div>",
                 unsafe_allow_html=True,
             )
 
@@ -1325,6 +1760,7 @@ if nav_key == "Portal Home":
                     "teams": f"{match.get('home_team_name') or '?'} vs {match.get('away_team_name') or '?'}",
                     "latest_status": latest.get("status") if latest else "no_jobs",
                     "model_version": (latest or {}).get("config", {}).get("model_version", "-"),
+                    "camera": (latest or {}).get("config", {}).get("camera_mode", "wide"),
                     "targets": _focus_targets_from_config((latest or {}).get("config", {})),
                     "updated_at": _iso_to_short((latest or {}).get("updated_at")),
                 }
@@ -1332,7 +1768,6 @@ if nav_key == "Portal Home":
         st.dataframe(recent_rows, use_container_width=True, hide_index=True)
     else:
         st.subheader("Studio")
-        st.caption("Browse games like a media library, launch analysis, monitor live detections, and review exports.")
 
         col_a, col_b, col_c, col_d = st.columns(4)
         col_a.metric("Games", len(matches))
@@ -1395,6 +1830,7 @@ if nav_key == "Portal Home":
                 match_date = str(match.get("match_date") or "-")
                 latest_status = str((latest or {}).get("status", "no_runs"))
                 latest_model = str((latest or {}).get("config", {}).get("model_version", "-"))
+                latest_camera = str((latest or {}).get("config", {}).get("camera_mode", "wide"))
                 latest_targets = _focus_targets_from_config((latest or {}).get("config", {}))
                 latest_bookmarks = int((latest or {}).get("result", {}).get("bookmarks_count", 0) or 0)
 
@@ -1410,13 +1846,14 @@ if nav_key == "Portal Home":
                     st.markdown(
                         f"""
 <div class="studio-card">
-  <h4>{game_name}</h4>
-  <p class="studio-muted">{teams}</p>
-  <p class="studio-muted">Date: {match_date}</p>
-  <span class="{chip_classes}">{latest_status}</span>
-  <span class="studio-chip">model: {latest_model}</span>
+  <h4>{_h(game_name)}</h4>
+  <p class="studio-muted">{_h(teams)}</p>
+  <p class="studio-muted">Date: {_h(match_date)}</p>
+  <span class="{chip_classes}">{_h(latest_status)}</span>
+  <span class="studio-chip">model: {_h(latest_model)}</span>
+  <span class="studio-chip">camera: {_h(latest_camera)}</span>
   <span class="studio-chip">bookmarks: {latest_bookmarks}</span>
-  <p class="studio-muted">targets: {latest_targets}</p>
+  <p class="studio-muted">targets: {_h(latest_targets)}</p>
 </div>
 """,
                         unsafe_allow_html=True,
@@ -1495,7 +1932,7 @@ if nav_key == "Portal Home":
 
             if selected_match:
                 st.subheader(f"Match Analysis: {selected_match.get('name') or selected_match_id}")
-                workspace_tabs = st.tabs(["Overview", "Live Analysis", "Runs", "Exports"])
+                workspace_tabs = st.tabs(["Overview", "Live Analysis", "Runs", "Exports", "Assistant"])
                 latest_job = _latest_job(jobs)
                 source_video = _resolve_match_video_source(selected_match)
 
@@ -1649,7 +2086,9 @@ if nav_key == "Portal Home":
                         )
                         st.progress(float(selected_job.get("progress", 0.0)))
                         st.caption(
-                            f"Model `{selected_job.get('config', {}).get('model_version', '-')}` | Targets `{_focus_targets_from_config(selected_job.get('config', {}))}`"
+                            f"Model `{selected_job.get('config', {}).get('model_version', '-')}` | "
+                            f"Camera `{selected_job.get('config', {}).get('camera_mode', 'wide')}` | "
+                            f"Targets `{_focus_targets_from_config(selected_job.get('config', {}))}`"
                         )
 
                         live_payload = list_job_bookmarks(api_base, tenant_id, token, selected_job_id, limit=5000)
@@ -1685,6 +2124,7 @@ if nav_key == "Portal Home":
                                     "status": job.get("status"),
                                     "stage": job.get("stage"),
                                     "model": (job.get("config", {}) or {}).get("model_version", "-"),
+                                    "camera": (job.get("config", {}) or {}).get("camera_mode", "wide"),
                                     "targets": _focus_targets_from_config(job.get("config", {}) or {}),
                                     "analysis_only": bool((job.get("config", {}) or {}).get("analysis_only", False)),
                                     "bookmarks": int((job.get("result", {}) or {}).get("bookmarks_count", 0) or 0),
@@ -1785,6 +2225,14 @@ if nav_key == "Portal Home":
                     else:
                         st.caption("No highlight exports yet for this match.")
 
+                with workspace_tabs[4]:
+                    _render_match_assistant(
+                        api_base=api_base,
+                        tenant_id=tenant_id,
+                        token=token,
+                        selected_match_id=selected_match_id,
+                    )
+
 elif nav_key == "New Processing Run":
     st.subheader("Launch Processing")
     mode = st.radio("Run Type", ["Upload New Game", "Rerun Existing Game"], horizontal=True, key="portal_run_mode")
@@ -1839,6 +2287,17 @@ elif nav_key == "New Processing Run":
             audio_sens = cfg_col5.slider("Audio Sensitivity", 1.0, 4.0, 2.0, 0.1, key="portal_new_audio_sens")
             thread_count = cfg_col6.number_input("Threads (0=auto)", min_value=0, max_value=32, value=0, key="portal_new_threads")
 
+            cam_col1, cam_col2, cam_col3 = st.columns(3)
+            camera_mode = cam_col1.selectbox(
+                "Camera Mode",
+                ["wide", "follow_action", "follow_player"],
+                index=0,
+                key="portal_new_camera_mode",
+                help="`follow_action` keeps the tracked player central while nudging toward nearby ball action.",
+            )
+            zoom_factor = cam_col2.slider("Zoom Factor", 1.0, 2.5, 1.6, 0.1, key="portal_new_zoom_factor")
+            cam_col3.caption("Use `wide` for the original frame. Follow-cam modes are best for player-centric exports.")
+
             opt_col1, opt_col2, opt_col3, opt_col4 = st.columns(4)
             no_audio = opt_col1.checkbox("Disable Audio Detection", value=False, key="portal_new_no_audio")
             overlay = opt_col2.checkbox("Generate Spotlight Overlay", value=False, key="portal_new_overlay")
@@ -1848,6 +2307,14 @@ elif nav_key == "New Processing Run":
                 value=False,
                 key="portal_new_analysis_only",
                 help="Generate bookmark table/events quickly without writing highlight video clips.",
+            )
+
+            player_roi_payload = _render_player_roi_selector(
+                context_key="portal_new",
+                default_enabled=False,
+                existing_roi=None,
+                upload_bytes=(upload.getvalue() if upload is not None else None),
+                upload_name=(upload.name if upload is not None else ""),
             )
 
         cooldown_until = float(st.session_state.portal_launch_cooldown_until or 0.0)
@@ -1866,6 +2333,9 @@ elif nav_key == "New Processing Run":
             st.session_state.portal_launch_cooldown_until = time.time() + 8.0
             if upload is None:
                 st.error("Upload a game video first.")
+                st.session_state.portal_launch_cooldown_until = 0.0
+            elif player_roi_payload.get("enabled") and not player_roi_payload.get("roi"):
+                st.error("Player ROI lock is enabled, but the first-frame selector is not ready. Uncheck it or choose a readable video.")
                 st.session_state.portal_launch_cooldown_until = 0.0
             else:
                 target_list = [item.strip().lower() for item in selected_targets if str(item).strip()]
@@ -1930,6 +2400,8 @@ elif nav_key == "New Processing Run":
                             "min_clip_duration": float(min_clip),
                             "speed_sensitivity": float(speed_sens),
                             "audio_sensitivity": float(audio_sens),
+                            "camera_mode": str(camera_mode),
+                            "zoom_factor": float(zoom_factor),
                             "overlay": bool(overlay),
                             "no_audio": bool(no_audio),
                             "require_gpu": bool(require_gpu),
@@ -1937,6 +2409,8 @@ elif nav_key == "New Processing Run":
                             "run_created_at": datetime.utcnow().isoformat(),
                             "run_created_from": "portal_ui",
                         }
+                        if player_roi_payload.get("roi"):
+                            job_config["player_roi"] = dict(player_roi_payload["roi"])
                         if int(thread_count) > 0:
                             job_config["threads"] = int(thread_count)
 
@@ -2010,6 +2484,26 @@ elif nav_key == "New Processing Run":
                     value=bool(source_job.get("config", {}).get("analysis_only", False)),
                     key="portal_rerun_analysis_only",
                 )
+                source_config = dict(source_job.get("config", {}) or {})
+                rerun_camera_options = ["wide", "follow_action", "follow_player"]
+                source_camera_mode = str(source_config.get("camera_mode") or "wide")
+                if source_camera_mode not in rerun_camera_options:
+                    source_camera_mode = "wide"
+                rerun_cam_col1, rerun_cam_col2 = st.columns(2)
+                rerun_camera_mode = rerun_cam_col1.selectbox(
+                    "Camera Mode",
+                    rerun_camera_options,
+                    index=rerun_camera_options.index(source_camera_mode),
+                    key="portal_rerun_camera_mode",
+                )
+                rerun_zoom_factor = rerun_cam_col2.slider(
+                    "Zoom Factor",
+                    1.0,
+                    2.5,
+                    float(source_config.get("zoom_factor", 1.6)),
+                    0.1,
+                    key="portal_rerun_zoom_factor",
+                )
 
                 rerun_cooldown_until = float(st.session_state.portal_launch_cooldown_until or 0.0)
                 rerun_locked = time.time() < rerun_cooldown_until
@@ -2029,6 +2523,8 @@ elif nav_key == "New Processing Run":
                     if targets:
                         overrides["focus_event_types"] = targets
                     overrides["analysis_only"] = bool(rerun_analysis_only)
+                    overrides["camera_mode"] = str(rerun_camera_mode)
+                    overrides["zoom_factor"] = float(rerun_zoom_factor)
 
                     rerun_result = api_request(
                         "POST",
@@ -2080,6 +2576,7 @@ elif nav_key == "Game Library":
                     "latest_status": latest.get("status") if latest else "no_jobs",
                     "latest_stage": latest.get("stage") if latest else "-",
                     "model_version": (latest or {}).get("config", {}).get("model_version", "-"),
+                    "camera": (latest or {}).get("config", {}).get("camera_mode", "wide"),
                     "targets": _focus_targets_from_config((latest or {}).get("config", {})),
                     "analysis_only": bool((latest or {}).get("config", {}).get("analysis_only", False)),
                     "bookmarks": int((latest or {}).get("result", {}).get("bookmarks_count", 0) or 0),
@@ -2297,6 +2794,7 @@ elif nav_key == "Game Library":
                     else:
                         summary_targets = _focus_targets_from_config(latest_config)
                         st.write(f"Model: `{latest_config.get('model_version', '-')}`")
+                        st.write(f"Camera: `{latest_config.get('camera_mode', 'wide')}`")
                         st.write(f"Targets: `{summary_targets}`")
                         st.write(f"Analysis-only: `{bool(latest_config.get('analysis_only', False))}`")
                     if st.button("Reprocess This Match (Latest Config)", key=f"portal_match_reprocess_latest_{selected_match_id}"):
@@ -2414,6 +2912,27 @@ elif nav_key == "Game Library":
                     )
                 )
 
+                cam_col1, cam_col2, cam_col3 = st.columns(3)
+                camera_mode_options = ["wide", "follow_action", "follow_player"]
+                current_camera_mode = str(latest_config.get("camera_mode") or "wide")
+                if current_camera_mode not in camera_mode_options:
+                    current_camera_mode = "wide"
+                camera_mode = cam_col1.selectbox(
+                    "Camera Mode",
+                    camera_mode_options,
+                    index=camera_mode_options.index(current_camera_mode),
+                    key=f"portal_match_custom_camera_mode_{selected_match_id}",
+                )
+                zoom_factor = cam_col2.slider(
+                    "Zoom Factor",
+                    1.0,
+                    2.5,
+                    float(latest_config.get("zoom_factor", 1.6)),
+                    0.1,
+                    key=f"portal_match_custom_zoom_factor_{selected_match_id}",
+                )
+                cam_col3.caption("Follow-cam crops around the tracked player and recenters nearby ball action.")
+
                 opt_col1, opt_col2, opt_col3 = st.columns(3)
                 no_audio = opt_col1.checkbox(
                     "Disable Audio Detection",
@@ -2431,59 +2950,73 @@ elif nav_key == "Game Library":
                     key=f"portal_match_custom_require_gpu_{selected_match_id}",
                 )
 
+                player_roi_payload = _render_player_roi_selector(
+                    context_key=f"portal_match_custom_{selected_match_id}",
+                    default_enabled=bool(latest_config.get("player_roi")),
+                    existing_roi=(latest_config.get("player_roi") if isinstance(latest_config.get("player_roi"), dict) else None),
+                    source_video_path=source_video or "",
+                )
+
                 if st.button("Reprocess This Match (Custom)", key=f"portal_match_reprocess_custom_{selected_match_id}"):
-                    target_list = [str(item).strip().lower() for item in targets if str(item).strip()]
-                    if custom_targets.strip():
-                        target_list.extend([item.strip().lower() for item in custom_targets.split(",") if item.strip()])
-                    target_list = list(dict.fromkeys(target_list))
-
-                    profile_defaults = _profile_defaults(profile_name, target_list)
-                    if profile_name != "Custom":
-                        pre_seconds = float(profile_defaults.get("pre_seconds", pre_seconds))
-                        post_seconds = float(profile_defaults.get("post_seconds", post_seconds))
-                        min_clip = float(profile_defaults.get("min_clip_duration", min_clip))
-                        speed_sens = float(profile_defaults.get("speed_sensitivity", speed_sens))
-                        audio_sens = float(profile_defaults.get("audio_sensitivity", audio_sens))
-                        target_list = list(dict.fromkeys(target_list + list(profile_defaults.get("focus_event_types", []))))
-
-                    next_config: Dict[str, Any] = {
-                        "profile_name": profile_name,
-                        "model_version": model_version,
-                        "focus_event_types": target_list,
-                        "pre_seconds": float(pre_seconds),
-                        "post_seconds": float(post_seconds),
-                        "min_clip_duration": float(min_clip),
-                        "speed_sensitivity": float(speed_sens),
-                        "audio_sensitivity": float(audio_sens),
-                        "overlay": bool(overlay),
-                        "no_audio": bool(no_audio),
-                        "require_gpu": bool(require_gpu),
-                        "analysis_only": bool(analysis_only),
-                        "run_created_at": datetime.utcnow().isoformat(),
-                        "run_created_from": "portal_match_workspace_custom",
-                    }
-                    if threads > 0:
-                        next_config["threads"] = int(threads)
-
-                    create_result = api_request(
-                        "POST",
-                        api_base,
-                        f"/matches/{selected_match_id}/jobs",
-                        tenant_id,
-                        token,
-                        json_body={"config": next_config},
-                    )
-                    if not create_result["ok"]:
-                        st.error(f"Failed to queue reprocess job: {create_result['payload']}")
+                    if player_roi_payload.get("enabled") and not player_roi_payload.get("roi"):
+                        st.error("Player ROI lock is enabled, but the first-frame selector is not ready. Uncheck it or choose a readable local source video.")
                     else:
-                        new_job_id = create_result["payload"]["job_id"]
-                        st.session_state.selected_job_id = new_job_id
-                        st.session_state.portal_auto_fetch_job_id = new_job_id
-                        st.session_state.portal_pending_nav = monitor_nav_label
-                        st.session_state.portal_flash_message = (
-                            f"Custom reprocess queued for match {selected_match_id}. job_id={new_job_id}"
+                        target_list = [str(item).strip().lower() for item in targets if str(item).strip()]
+                        if custom_targets.strip():
+                            target_list.extend([item.strip().lower() for item in custom_targets.split(",") if item.strip()])
+                        target_list = list(dict.fromkeys(target_list))
+
+                        profile_defaults = _profile_defaults(profile_name, target_list)
+                        if profile_name != "Custom":
+                            pre_seconds = float(profile_defaults.get("pre_seconds", pre_seconds))
+                            post_seconds = float(profile_defaults.get("post_seconds", post_seconds))
+                            min_clip = float(profile_defaults.get("min_clip_duration", min_clip))
+                            speed_sens = float(profile_defaults.get("speed_sensitivity", speed_sens))
+                            audio_sens = float(profile_defaults.get("audio_sensitivity", audio_sens))
+                            target_list = list(dict.fromkeys(target_list + list(profile_defaults.get("focus_event_types", []))))
+
+                        next_config: Dict[str, Any] = {
+                            "profile_name": profile_name,
+                            "model_version": model_version,
+                            "focus_event_types": target_list,
+                            "pre_seconds": float(pre_seconds),
+                            "post_seconds": float(post_seconds),
+                            "min_clip_duration": float(min_clip),
+                            "speed_sensitivity": float(speed_sens),
+                            "audio_sensitivity": float(audio_sens),
+                            "camera_mode": str(camera_mode),
+                            "zoom_factor": float(zoom_factor),
+                            "overlay": bool(overlay),
+                            "no_audio": bool(no_audio),
+                            "require_gpu": bool(require_gpu),
+                            "analysis_only": bool(analysis_only),
+                            "run_created_at": datetime.utcnow().isoformat(),
+                            "run_created_from": "portal_match_workspace_custom",
+                        }
+                        if player_roi_payload.get("roi"):
+                            next_config["player_roi"] = dict(player_roi_payload["roi"])
+                        if threads > 0:
+                            next_config["threads"] = int(threads)
+
+                        create_result = api_request(
+                            "POST",
+                            api_base,
+                            f"/matches/{selected_match_id}/jobs",
+                            tenant_id,
+                            token,
+                            json_body={"config": next_config},
                         )
-                        safe_rerun()
+                        if not create_result["ok"]:
+                            st.error(f"Failed to queue reprocess job: {create_result['payload']}")
+                        else:
+                            new_job_id = create_result["payload"]["job_id"]
+                            st.session_state.selected_job_id = new_job_id
+                            st.session_state.portal_auto_fetch_job_id = new_job_id
+                            st.session_state.portal_pending_nav = monitor_nav_label
+                            st.session_state.portal_flash_message = (
+                                f"Custom reprocess queued for match {selected_match_id}. job_id={new_job_id}"
+                            )
+                            safe_rerun()
 
         st.subheader("Processing Transactions")
         if not jobs:
@@ -2495,6 +3028,7 @@ elif nav_key == "Game Library":
                     st.markdown(_build_stage_tracker(job.get("stage"), job.get("status")), unsafe_allow_html=True)
                     st.progress(float(job.get("progress", 0.0)))
                     st.write(f"Model: `{job.get('config', {}).get('model_version', '-')}`")
+                    st.write(f"Camera: `{job.get('config', {}).get('camera_mode', 'wide')}`")
                     st.write(f"Targets: `{_focus_targets_from_config(job.get('config', {}))}`")
                     st.write(f"Analysis-only: `{bool(job.get('config', {}).get('analysis_only', False))}`")
                     st.write(f"Bookmarks detected: `{int((job.get('result', {}) or {}).get('bookmarks_count', 0) or 0)}`")
@@ -2690,6 +3224,7 @@ else:
                 st.json(payload.get("result", {}))
             else:
                 st.write(f"Model: `{payload.get('config', {}).get('model_version', '-')}`")
+                st.write(f"Camera: `{payload.get('config', {}).get('camera_mode', 'wide')}`")
                 st.write(f"Targets: `{_focus_targets_from_config(payload.get('config', {}))}`")
                 st.write(f"Bookmarks: `{int((payload.get('result', {}) or {}).get('bookmarks_count', 0) or 0)}`")
             status_value = str(payload.get("status", "")).lower()

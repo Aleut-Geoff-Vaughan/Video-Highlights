@@ -1,18 +1,31 @@
 from __future__ import annotations
 
+import json
 from collections import Counter
+from typing import Any
 from typing import Dict, List, Optional, Tuple
 
+import requests
 from sqlmodel import Session, select
 
 from ..config import settings
-from ..models import Event
+from ..models import Event, Match
 
 
 class AgentService:
-    def __init__(self) -> None:
-        self.provider = settings.llm_provider
-        self.model = settings.llm_model
+    @property
+    def provider(self) -> str:
+        raw = str(settings.llm_provider or "none").strip().lower()
+        aliases = {
+            "local": "ollama",
+            "lmstudio": "openai_compatible",
+            "openai-compatible": "openai_compatible",
+        }
+        return aliases.get(raw, raw or "none")
+
+    @property
+    def model(self) -> str:
+        return str(settings.llm_model or "").strip() or "gpt-4o-mini"
 
     def query_match(
         self,
@@ -22,11 +35,12 @@ class AgentService:
         query: str,
         limit: int = 50,
     ) -> Dict[str, object]:
+        match = self._get_match(session, tenant_id, match_id)
         events = self._get_match_events(session, tenant_id, match_id, limit=limit)
-        fallback = self._fallback_query_answer(events, query)
+        fallback = self._fallback_query_answer(match, match_id, events, query)
         referenced_ids = [event.id for event in events[: min(len(events), 20)]]
 
-        llm_answer = self._try_llm_query(events, query)
+        llm_answer = self._try_llm_query(match, events, query)
         if llm_answer:
             return {
                 "provider": self.provider,
@@ -50,6 +64,7 @@ class AgentService:
         event_id: str,
         question: Optional[str] = None,
     ) -> Dict[str, object]:
+        match = self._get_match(session, tenant_id, match_id)
         event = session.exec(
             select(Event)
             .where(Event.tenant_id == tenant_id)
@@ -64,8 +79,8 @@ class AgentService:
                 "referenced_event_ids": [],
             }
 
-        fallback_answer = self._fallback_event_explanation(event, question)
-        llm_answer = self._try_llm_explanation(event, question)
+        fallback_answer = self._fallback_event_explanation(match, event, question)
+        llm_answer = self._try_llm_explanation(match, event, question)
         if llm_answer:
             return {
                 "provider": self.provider,
@@ -91,23 +106,96 @@ class AgentService:
         )
         return list(session.exec(stmt))
 
-    def _fallback_query_answer(self, events: List[Event], query: str) -> str:
+    def _get_match(self, session: Session, tenant_id: str, match_id: str) -> Optional[Match]:
+        if session is None:
+            return None
+        match = session.get(Match, match_id)
+        if not match or match.tenant_id != tenant_id:
+            return None
+        return match
+
+    def _match_label(self, match: Optional[Match], fallback_match_id: Optional[str] = None) -> str:
+        if match is None:
+            return fallback_match_id or "this match"
+        name = str(match.name or "").strip()
+        if name:
+            return name
+        teams = " vs ".join(part for part in [str(match.home_team_name or "").strip(), str(match.away_team_name or "").strip()] if part)
+        if teams:
+            return teams
+        return fallback_match_id or str(match.id)
+
+    def _format_clock_ms(self, value: int) -> str:
+        total_seconds = max(0, int(round(float(value) / 1000.0)))
+        minutes, seconds = divmod(total_seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours > 0:
+            return f"{hours}:{minutes:02d}:{seconds:02d}"
+        return f"{minutes}:{seconds:02d}"
+
+    def _event_context_row(self, event: Event) -> Dict[str, object]:
+        source = dict(event.source_json or {})
+        evidence = dict(event.evidence_json or {})
+        explanations = list(event.explanations_json or [])
+        duration_ms = max(0, int(event.end_ms) - int(event.start_ms))
+        return {
+            "event_id": event.id,
+            "event_type": event.event_type,
+            "status": event.status,
+            "confidence": round(float(event.confidence), 3),
+            "time": self._format_clock_ms(int(event.occurred_at_ms)),
+            "occurred_at_ms": int(event.occurred_at_ms),
+            "start_ms": int(event.start_ms),
+            "end_ms": int(event.end_ms),
+            "duration_s": round(duration_ms / 1000.0, 3),
+            "team_id": event.team_id,
+            "player_id": event.player_id,
+            "jersey_number": event.jersey_number,
+            "detector": source.get("detector"),
+            "camera_mode": source.get("camera_mode"),
+            "zoom_factor": source.get("zoom_factor"),
+            "bookmark_label": source.get("bookmark_label"),
+            "sources": list(source.get("sources", []) or []),
+            "signals": [
+                {
+                    "signal": str(item.get("signal") or ""),
+                    "value": item.get("value"),
+                }
+                for item in explanations[:4]
+                if isinstance(item, dict) and item.get("signal")
+            ],
+            "has_tracking_manifest": bool(evidence.get("tracking_manifest_path")),
+        }
+
+    def _fallback_query_answer(self, match: Optional[Match], match_id: str, events: List[Event], query: str) -> str:
         if not events:
-            return "No events are available yet for this match."
+            return f"No detected events are available yet for {self._match_label(match, match_id)}."
 
         counts = Counter(event.event_type for event in events)
         total = len(events)
         top_three = ", ".join(f"{k}: {v}" for k, v in counts.most_common(3))
+        strongest = sorted(events, key=lambda event: (float(event.confidence), int(event.occurred_at_ms)), reverse=True)[:3]
+        strongest_text = ", ".join(
+            f"{event.event_type} at {self._format_clock_ms(int(event.occurred_at_ms))} ({float(event.confidence):.2f})"
+            for event in strongest
+        )
+        label = self._match_label(match, match_id)
 
         return (
-            f"Using the latest {total} events, the most common event types are {top_three}. "
-            f"Query received: '{query}'. Use event filters for exact slices (team, player, period, time range)."
+            f"{label} has {total} detected events. Most common event types: {top_three}. "
+            f"Highest-confidence moments: {strongest_text}. "
+            f"Query received: '{query}'. Use the event list for exact slices by team, player, or time range."
         )
 
-    def _fallback_event_explanation(self, event: Event, question: Optional[str]) -> str:
+    def _fallback_event_explanation(self, match: Optional[Match], event: Event, question: Optional[str]) -> str:
         parts = [
+            f"Match: {self._match_label(match, event.match_id)}.",
             f"Event {event.id} is labeled as '{event.event_type}' with confidence {event.confidence:.2f}.",
-            f"Timestamp window: {event.start_ms}ms to {event.end_ms}ms (occurred_at={event.occurred_at_ms}ms).",
+            (
+                f"Timestamp window: {self._format_clock_ms(int(event.start_ms))} to "
+                f"{self._format_clock_ms(int(event.end_ms))} "
+                f"(occurred_at={self._format_clock_ms(int(event.occurred_at_ms))})."
+            ),
         ]
 
         if event.team_id:
@@ -123,38 +211,77 @@ class AgentService:
             parts.append(f"Question received: '{question}'.")
         return " ".join(parts)
 
-    def _try_llm_query(self, events: List[Event], query: str) -> Optional[str]:
-        payload = self._prepare_llm_payload(events, query=query)
-        return self._call_openai(payload)
+    def _try_llm_query(self, match: Optional[Match], events: List[Event], query: str) -> Optional[str]:
+        payload = self._prepare_llm_payload(match, events, query=query)
+        return self._call_llm(payload)
 
-    def _try_llm_explanation(self, event: Event, question: Optional[str]) -> Optional[str]:
+    def _try_llm_explanation(self, match: Optional[Match], event: Event, question: Optional[str]) -> Optional[str]:
         query = question or "Explain why this event was detected and what confidence caveats apply."
-        payload = self._prepare_llm_payload([event], query=query)
-        return self._call_openai(payload)
+        payload = self._prepare_llm_payload(match, [event], query=query)
+        return self._call_llm(payload)
 
-    def _prepare_llm_payload(self, events: List[Event], query: str) -> Tuple[str, str]:
-        summary_rows = []
-        for event in events[:100]:
-            summary_rows.append(
-                {
-                    "event_id": event.id,
-                    "event_type": event.event_type,
-                    "confidence": event.confidence,
-                    "occurred_at_ms": event.occurred_at_ms,
-                    "team_id": event.team_id,
-                    "player_id": event.player_id,
-                }
-            )
+    def _prepare_llm_payload(self, match: Optional[Match], events: List[Event], query: str) -> Tuple[str, str]:
+        ordered_events = sorted(events[:100], key=lambda event: int(event.occurred_at_ms))
+        summary_rows = [self._event_context_row(event) for event in ordered_events]
+        counts = Counter(event.event_type for event in ordered_events)
+        strongest_events = sorted(
+            ordered_events,
+            key=lambda event: (float(event.confidence), int(event.occurred_at_ms)),
+            reverse=True,
+        )[:8]
+
+        match_context = {
+            "match_id": str(match.id) if match is not None else None,
+            "name": str(match.name or "").strip() if match is not None else None,
+            "home_team_name": str(match.home_team_name or "").strip() if match is not None else None,
+            "away_team_name": str(match.away_team_name or "").strip() if match is not None else None,
+            "match_date": str(match.match_date or "").strip() if match is not None else None,
+            "requested_targets": (
+                list((match.metadata_json or {}).get("requested_targets", []) or [])
+                if match is not None and isinstance(match.metadata_json, dict)
+                else []
+            ),
+        }
 
         system = (
             "You are an assistant for soccer video analysis. "
-            "Do not fabricate unseen facts. Use only provided event context."
+            "Use only the provided match and event context. "
+            "Do not claim you watched the video. "
+            "When asked about missing moments, frame them as review candidates or hypotheses, not facts. "
+            "Be concise, practical, and mention uncertainty when event evidence looks weak."
         )
-        user = f"Query: {query}\n\nEvent context:\n{summary_rows}"
+        user = (
+            f"Query: {query}\n\n"
+            "Match context JSON:\n"
+            f"{json.dumps(match_context, indent=2)}\n\n"
+            "Event counts by type:\n"
+            f"{json.dumps(dict(counts), indent=2)}\n\n"
+            "Highest-confidence events JSON:\n"
+            f"{json.dumps([self._event_context_row(event) for event in strongest_events], indent=2)}\n\n"
+            "Event context JSON:\n"
+            f"{json.dumps(summary_rows, indent=2)}"
+        )
         return system, user
 
-    def _call_openai(self, payload: Tuple[str, str]) -> Optional[str]:
-        if self.provider != "openai" or not settings.openai_api_key:
+    def _call_llm(self, payload: Tuple[str, str]) -> Optional[str]:
+        if self.provider == "openai":
+            return self._call_openai_chat(payload, api_key=settings.openai_api_key, base_url=None)
+        if self.provider == "openai_compatible":
+            if not settings.llm_base_url:
+                return None
+            api_key = settings.llm_api_key or "local-dev-key"
+            return self._call_openai_chat(payload, api_key=api_key, base_url=settings.llm_base_url)
+        if self.provider == "ollama":
+            return self._call_ollama(payload)
+        return None
+
+    def _call_openai_chat(
+        self,
+        payload: Tuple[str, str],
+        api_key: Optional[str],
+        base_url: Optional[str],
+    ) -> Optional[str]:
+        if not api_key:
             return None
 
         try:
@@ -164,18 +291,69 @@ class AgentService:
 
         system, user = payload
         try:
-            client = OpenAI(api_key=settings.openai_api_key)
-            response = client.responses.create(
+            client_kwargs: Dict[str, Any] = {"api_key": api_key}
+            if base_url:
+                client_kwargs["base_url"] = base_url
+            client = OpenAI(**client_kwargs)
+            response = client.chat.completions.create(
                 model=self.model,
-                input=[
+                messages=[
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
             )
-            text = (response.output_text or "").strip()
-            return text or None
+            if not response.choices:
+                return None
+            message = response.choices[0].message
+            text = self._extract_message_text(getattr(message, "content", None))
+            return text.strip() or None
         except Exception:
             return None
+
+    def _call_ollama(self, payload: Tuple[str, str]) -> Optional[str]:
+        base_url = str(settings.llm_base_url or "http://127.0.0.1:11434").rstrip("/")
+        if base_url.endswith("/v1"):
+            base_url = base_url[:-3].rstrip("/")
+        endpoint = f"{base_url}/api/chat"
+        system, user = payload
+        body = {
+            "model": self.model,
+            "stream": False,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        }
+        try:
+            response = requests.post(endpoint, json=body, timeout=float(settings.llm_timeout_seconds))
+            response.raise_for_status()
+            payload_json = response.json()
+            message = payload_json.get("message", {}) if isinstance(payload_json, dict) else {}
+            text = message.get("content") if isinstance(message, dict) else None
+            if isinstance(text, str):
+                return text.strip() or None
+            return None
+        except Exception:
+            return None
+
+    def _extract_message_text(self, content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: List[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    text = item.get("text")
+                    if isinstance(text, str):
+                        parts.append(text)
+                    else:
+                        nested = item.get("content")
+                        if isinstance(nested, str):
+                            parts.append(nested)
+            return "\n".join(part for part in parts if part).strip()
+        return ""
 
 
 agent_service = AgentService()

@@ -62,10 +62,19 @@ pip install -r requirements.txt
 python VideoHighlights.py --video path/to/match.mp4 --out ./highlights_output
 ```
 
+Follow-cam clip export is available for player-centric runs:
+
+```bash
+python VideoHighlights.py --video path/to/match.mp4 --out ./highlights_output --camera-mode follow_action --zoom-factor 1.6
+```
+
+Use `--camera-mode wide` to preserve the original frame. `follow_player` keeps the selected or auto-selected player centered; `follow_action` blends the player track with nearby ball detections.
+
 ### Run Processing Portal (Streamlit)
 
 ```bash
-streamlit run app.py
+set VH_PORTAL_API_BASE=http://127.0.0.1:8000/v1
+python -m streamlit run app.py
 ```
 
 ### Run API Client UI (Streamlit)
@@ -158,6 +167,41 @@ JWT support is also available:
 3. Issue JWT via `POST /v1/auth/token`
 4. Inspect current identity via `GET /v1/auth/me`
 5. Send `X-Tenant-Id` header (tenant id or slug) for tenant-scoped endpoints
+
+### LLM Analysis Provider
+
+The match assistant endpoints (`/v1/matches/{match_id}/agent/*`) can run with fallback summaries, OpenAI, or a local LLM.
+
+OpenAI cloud:
+
+```bash
+set VH_LLM_PROVIDER=openai
+set VH_LLM_MODEL=gpt-4o-mini
+set OPENAI_API_KEY=<your-key>
+```
+
+Ollama local:
+
+```bash
+set VH_LLM_PROVIDER=ollama
+set VH_LLM_MODEL=llama3.2:3b
+set VH_LLM_BASE_URL=http://127.0.0.1:11434
+```
+
+OpenAI-compatible local servers (LM Studio, vLLM, llama.cpp server, Ollama `/v1` mode):
+
+```bash
+set VH_LLM_PROVIDER=openai_compatible
+set VH_LLM_MODEL=local-model-name
+set VH_LLM_BASE_URL=http://127.0.0.1:1234/v1
+set VH_LLM_API_KEY=local-dev-key
+```
+
+Optional timeout override:
+
+```bash
+set VH_LLM_TIMEOUT_SECONDS=20
+```
 
 ### Multi-tenant and Admin API
 

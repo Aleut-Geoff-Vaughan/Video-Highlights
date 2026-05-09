@@ -193,7 +193,7 @@ with tabs[3]:
     st.text_input("Match ID ", key="match_id")
     job_config_text = st.text_area(
         "Job Config JSON",
-        value='{"pre_seconds":2.0,"post_seconds":6.0,"min_clip_duration":4.0,"overlay":false}',
+        value='{"pre_seconds":2.0,"post_seconds":6.0,"min_clip_duration":4.0,"camera_mode":"wide","zoom_factor":1.6,"overlay":false}',
         height=140,
     )
     if st.button("Create Processing Job", disabled=not st.session_state.match_id):
@@ -230,7 +230,13 @@ with tabs[3]:
         st.json(result)
         if auto_refresh and result["ok"] and result["payload"].get("status") in {"queued", "claimed", "running"}:
             time.sleep(2)
-            st.experimental_rerun()
+            rerun_fn = getattr(st, "rerun", None)
+            if callable(rerun_fn):
+                rerun_fn()
+            else:
+                legacy_rerun = getattr(st, "experimental_rerun", None)
+                if callable(legacy_rerun):
+                    legacy_rerun()
 
     if st.button("Retry Job", disabled=not st.session_state.job_id):
         r = api_request(
