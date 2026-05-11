@@ -43,7 +43,7 @@ Notes:
   • Trimming creates a temporary video for processing, but final clips come from the original video
   • First run will auto-download YOLO weights (~6MB).
   • Works best with 1080p/60 or 4K/60 videos recorded from a stable, elevated sideline or halfway-line vantage.
-  • GPU acceleration requires PyTorch with CUDA: pip install torch --index-url https://download.pytorch.org/whl/cu118
+  • GPU acceleration requires PyTorch with CUDA: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
 """
 
 import os
@@ -784,7 +784,15 @@ def check_nvenc_available() -> bool:
     """Check if NVENC GPU encoding is available"""
     try:
         import subprocess
-        result = subprocess.run(['ffmpeg', '-hide_banner', '-encoders'],
+        ffmpeg_binary = 'ffmpeg'
+        try:
+            from backend.services.ffmpeg_tools import ensure_ffmpeg_on_path, ffmpeg_exe
+
+            ensure_ffmpeg_on_path()
+            ffmpeg_binary = ffmpeg_exe()
+        except Exception:
+            pass
+        result = subprocess.run([ffmpeg_binary, '-hide_banner', '-encoders'],
                               capture_output=True, text=True, timeout=5)
         output = f"{result.stdout}\n{result.stderr}".lower()
         # Require the encoder token in the ffmpeg encoder list.
@@ -1206,7 +1214,7 @@ def process_video_highlights(
             print("  1. You have an NVIDIA GPU installed")
             print("  2. CUDA drivers are installed (run 'nvidia-smi' to verify)")
             print("  3. PyTorch with CUDA support is installed:")
-            print("     pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118")
+            print("     pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130")
             return False
 
     # Validate paths

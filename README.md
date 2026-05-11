@@ -77,6 +77,27 @@ set VH_PORTAL_API_BASE=http://127.0.0.1:8000/v1
 python -m streamlit run app.py
 ```
 
+For large match files, including 10GB+ recordings, use the portal's **Local File Path (10GB+)** video source. Use **Browse** or paste a path to register a file that already exists on the API/worker machine and process it in place. The portal preflights the path through the API worker and reports file size, basic media metadata when `ffprobe` is available, and clear messages for missing, zero-byte, cloud-placeholder, or still-copying files. Browser upload is intended only for smaller files.
+
+Leave **Limit to test window** enabled for the first smoke test. The default window processes only the first 2 minutes, which is much faster and safer than starting with a full 10GB match.
+
+### GPU Acceleration
+
+The API exposes GPU readiness at:
+
+```bash
+curl http://127.0.0.1:8000/v1/health/gpu
+```
+
+On NVIDIA systems, install CUDA-enabled PyTorch instead of the CPU wheel. For this machine's CUDA 13 driver path:
+
+```bash
+python -m pip install --upgrade --force-reinstall torch torchvision --index-url https://download.pytorch.org/whl/cu130
+python -m pip install "pillow<12,>=9.2.0"
+```
+
+The portal sidebar shows whether PyTorch CUDA is ready and whether FFmpeg can see `h264_nvenc` for GPU clip rendering. When **Require GPU** is enabled, jobs fail early if CUDA is not available.
+
 ### Run API Client UI (Streamlit)
 
 ```bash
@@ -234,16 +255,25 @@ set VH_LOG_LEVEL=DEBUG
 set VH_JOB_LOG_DETAIL=extreme
 ```
 
+Per-run logging profiles are also available from the Processing Portal:
+
+1. `Standard`: core status and failure logs.
+2. `Detailed`: process-language checkpoints plus technical context for normal testing.
+3. `Diagnostic`: detailed logs plus raw config/pipeline invocation checkpoints for deep debugging.
+
+Run Monitor's Log Inspector can show the same logs as a **Process Story**, a **Technical Table**, or raw rows.
+
 Job-level debug endpoints:
 
 1. `GET /v1/jobs/{job_id}/logs` (supports `level`, `stage`, `detail_level`, `limit`)
-2. `GET /v1/jobs/{job_id}/bookmarks` (live bookmark table from events/job result/manifest)
-3. `POST /v1/jobs/{job_id}/kill-session` (fast cancel path for testing)
-4. `POST /v1/jobs/{job_id}/rerun` (rerun with optional config/model/event-target overrides)
-5. `GET /v1/matches/{match_id}/events?job_id=<job_id>` (bookmark/event table for a specific processing run)
-6. `POST /v1/matches/{match_id}/events/{event_id}/clip-on-demand` (frame-accurate bookmark clip rendering with cache reuse)
-7. `DELETE /v1/jobs/{job_id}` (delete old run, including job logs and job-linked events)
-8. `POST /v1/matches/{match_id}/exports/highlights` (export one highlight reel from selected bookmarks/events)
+2. `GET /v1/jobs/{job_id}/diagnostics` (human-readable status summary, likely issue, and next action)
+3. `GET /v1/jobs/{job_id}/bookmarks` (live bookmark table from events/job result/manifest)
+4. `POST /v1/jobs/{job_id}/kill-session` (fast cancel path for testing)
+5. `POST /v1/jobs/{job_id}/rerun` (rerun with optional config/model/event-target overrides)
+6. `GET /v1/matches/{match_id}/events?job_id=<job_id>` (bookmark/event table for a specific processing run)
+7. `POST /v1/matches/{match_id}/events/{event_id}/clip-on-demand` (frame-accurate bookmark clip rendering with cache reuse)
+8. `DELETE /v1/jobs/{job_id}` (delete old run, including job logs and job-linked events)
+9. `POST /v1/matches/{match_id}/exports/highlights` (export one highlight reel from selected bookmarks/events)
 
 Codec fallback behavior:
 
@@ -253,14 +283,15 @@ Codec fallback behavior:
 Analysis-only mode and bookmark outputs:
 
 1. Set job config `"analysis_only": true` to skip clip rendering and generate fast event/bookmark analysis only.
-2. Every run writes `analysis_bookmarks.json` and `analysis_bookmarks.csv` to the job output directory.
-3. Completed jobs persist bookmark data in job result payload and auto-create `Event` rows linked to the job.
-4. Processing Portal Game Library includes full-match playback with bookmark jump controls.
-5. Bookmark rows can render frame-accurate on-demand clips without reprocessing the full match.
-6. Operations Console includes bulk queue controls to kill queued/active jobs for a selected match.
-7. Game Library includes a Match Workspace for one-click reprocess (latest config) and custom reprocess (same uploaded source video).
-8. Processing Portal supports an Experience toggle (`User Friendly` / `Technical`) for non-technical vs advanced workflows.
-9. Match Studio supports deleting old runs per match and exporting selected bookmarks into a final highlight reel.
+2. Set job config `"trim_start"` and `"trim_end"` in seconds, or use the portal **Limit to test window** control, to process only a short slice of a match.
+3. Every run writes `analysis_bookmarks.json` and `analysis_bookmarks.csv` to the job output directory.
+4. Completed jobs persist bookmark data in job result payload and auto-create `Event` rows linked to the job.
+5. Processing Portal Game Library includes full-match playback with bookmark jump controls.
+6. Bookmark rows can render frame-accurate on-demand clips without reprocessing the full match.
+7. Operations Console includes bulk queue controls to kill queued/active jobs for a selected match.
+8. Game Library includes a Match Workspace for one-click reprocess (latest config) and custom reprocess (same uploaded source video).
+9. Processing Portal supports an Experience toggle (`User Friendly` / `Technical`) for non-technical vs advanced workflows.
+10. Match Studio supports deleting old runs per match and exporting selected bookmarks into a final highlight reel.
 
 Portal launchers:
 

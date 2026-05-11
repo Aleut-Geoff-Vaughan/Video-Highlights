@@ -5,13 +5,14 @@ import tempfile
 from pathlib import Path
 from typing import List, Tuple
 
+from .ffmpeg_tools import ffmpeg_exe
 from ..utils import ensure_dir
 
 
 def _ffmpeg_encoder_available(encoder_name: str) -> bool:
     try:
         result = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-encoders"],
+            [ffmpeg_exe(), "-hide_banner", "-encoders"],
             capture_output=True,
             text=True,
             timeout=6,
@@ -51,7 +52,7 @@ def render_clip_ffmpeg(
     ensure_dir(str(out_file.parent))
 
     base_cmd = [
-        "ffmpeg",
+        ffmpeg_exe(),
         "-y",
         "-hide_banner",
         "-loglevel",
@@ -101,7 +102,7 @@ def concat_clips_ffmpeg(
 
     try:
         cmd = [
-            "ffmpeg",
+            ffmpeg_exe(),
             "-y",
             "-hide_banner",
             "-loglevel",

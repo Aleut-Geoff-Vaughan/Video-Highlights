@@ -29,6 +29,7 @@ REQUIRED_PATHS = {
     "/v1/admin/tenant/summary",
     "/v1/admin/tenant/users",
     "/v1/jobs/{job_id}/logs",
+    "/v1/jobs/{job_id}/diagnostics",
     "/v1/jobs/{job_id}/bookmarks",
     "/v1/jobs/{job_id}/kill-session",
     "/v1/jobs/{job_id}/rerun",

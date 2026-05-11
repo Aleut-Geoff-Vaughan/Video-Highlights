@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Dict
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from sqlmodel import Session, select
@@ -147,6 +147,105 @@ def _read_live_manifest_bookmarks(job: ProcessingJob) -> list[Dict[str, object]]
     return [entry for entry in bookmarks if isinstance(entry, dict)]
 
 
+def _config_summary(config: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "model_version": config.get("model_version"),
+        "camera_mode": config.get("camera_mode", "wide"),
+        "analysis_only": bool(config.get("analysis_only", False)),
+        "require_gpu": bool(config.get("require_gpu", False)),
+        "focus_event_types": list(config.get("focus_event_types", []) or []),
+        "trim_start": config.get("trim_start"),
+        "trim_end": config.get("trim_end"),
+        "log_profile": _log_profile(config),
+    }
+
+
+def _log_profile(config: Dict[str, Any]) -> str:
+    value = str(config.get("log_profile") or config.get("logging_profile") or "standard").strip().lower()
+    return value if value in {"standard", "detailed", "diagnostic"} else "standard"
+
+
+def _next_action_for(text: str, status: str, bookmarks_count: int) -> str:
+    lower = text.lower()
+    if "video path" in lower or "file not found" in lower or "does not exist" in lower:
+        return "Re-register the local video source on the match, then rerun the job."
+    if "gpu" in lower or "cuda" in lower:
+        return "Check /v1/health/gpu, then rerun with Require GPU enabled only after CUDA is ready."
+    if "ffmpeg" in lower or "ffprobe" in lower or "encoder" in lower:
+        return "Confirm FFmpeg/ffprobe are available to the API worker, then rerun."
+    if "log" in lower and "profile" in lower:
+        return "Use Run Monitor logs to follow the run story and technical details."
+    if status in {"queued", "claimed"}:
+        return "Run the worker once or keep the monitor open while the worker picks up the job."
+    if status in {"running", "cancel_requested"}:
+        return "Keep this monitor open. Cancel or kill only if progress is stuck."
+    if status == "completed" and bookmarks_count <= 0:
+        return "Try a longer test window or broader event targets, then rerun analysis."
+    if status == "completed":
+        return "Open the Game Library review view to inspect bookmarks and render/export clips."
+    if status in {"canceled"}:
+        return "Rerun from the latest config when ready."
+    return "Open logs for details, fix the reported issue, then rerun."
+
+
+def _diagnostic_summary(job: ProcessingJob, logs: List[JobLogEntry]) -> Dict[str, object]:
+    status = str(job.status or "").lower()
+    stage = str(job.stage or "")
+    result = dict(job.result_json or {})
+    config = dict(job.config_json or {})
+    bookmarks_count = int(result.get("bookmarks_count", 0) or 0)
+    error_logs = [item for item in logs if str(item.level).lower() == "error"]
+    warning_logs = [item for item in logs if str(item.level).lower() == "warning"]
+
+    if status == "failed":
+        summary = str(job.error_message or (error_logs[0].message if error_logs else "") or "Run failed.")
+        severity = "error"
+    elif status == "completed":
+        summary = (
+            f"Run completed with {bookmarks_count} bookmarks."
+            if bookmarks_count
+            else "Run completed, but no bookmarks were detected."
+        )
+        severity = "success" if bookmarks_count else "warning"
+    elif status in {"queued", "claimed"}:
+        summary = f"Run is {status}; no processing output has been produced yet."
+        severity = "info"
+    elif status in {"running", "cancel_requested"}:
+        summary = f"Run is {status} at stage {stage or 'unknown'}."
+        severity = "warning" if status == "cancel_requested" else "info"
+    elif status == "canceled":
+        summary = str(job.error_message or "Run was canceled.")
+        severity = "warning"
+    else:
+        summary = f"Run status is {status or 'unknown'}."
+        severity = "info"
+
+    log_rows = [job_log_to_read(item).model_dump() for item in logs]
+    error_rows = [job_log_to_read(item).model_dump() for item in error_logs]
+    warning_rows = [job_log_to_read(item).model_dump() for item in warning_logs]
+    return {
+        "job_id": job.id,
+        "match_id": job.match_id,
+        "status": job.status,
+        "stage": job.stage,
+        "progress": job.progress,
+        "severity": severity,
+        "summary": summary,
+        "next_action": _next_action_for(summary, status, bookmarks_count),
+        "error_message": job.error_message,
+        "config_summary": _config_summary(config),
+        "result_summary": {
+            "bookmarks_count": bookmarks_count,
+            "artifact_count": int(result.get("artifact_count", 0) or 0),
+            "output_dir": result.get("output_dir"),
+        },
+        "latest_log": log_rows[0] if log_rows else None,
+        "recent_logs": log_rows[:12],
+        "error_logs": error_rows[:12],
+        "warning_logs": warning_rows[:12],
+    }
+
+
 @router.post("/matches/{match_id}/jobs", response_model=JobRead, status_code=201)
 def create_job(
     match_id: str,
@@ -171,7 +270,27 @@ def create_job(
         stage="queued",
         message="Processing job created",
         detail_level="basic",
-        data={"execution_mode": settings.job_execution_mode},
+        data={
+            "execution_mode": settings.job_execution_mode,
+            "process_message": "A new processing run has been queued for this match.",
+            "technical_message": "ProcessingJob row created and queued with the submitted config.",
+            "log_profile": _log_profile(payload.config),
+        },
+    )
+    append_job_log(
+        session=session,
+        job_id=job.id,
+        tenant_id=job.tenant_id,
+        level="info",
+        stage="queued",
+        message="Logging profile selected",
+        detail_level="detailed",
+        data={
+            "log_profile": _log_profile(payload.config),
+            "process_message": "This run will keep extra step-by-step notes for easier testing.",
+            "technical_message": "Per-run log_profile controls which detailed worker checkpoints are persisted.",
+        },
+        force_persist=_log_profile(payload.config) in {"detailed", "diagnostic"},
     )
     append_job_log(
         session=session,
@@ -181,7 +300,13 @@ def create_job(
         stage="queued",
         message="Job configuration accepted",
         detail_level="extreme",
-        data={"config": payload.config},
+        data={
+            "config": payload.config,
+            "process_message": "The exact run settings were captured for later comparison.",
+            "technical_message": "Raw job config persisted for diagnostic replay.",
+            "log_profile": _log_profile(payload.config),
+        },
+        force_persist=_log_profile(payload.config) == "diagnostic",
     )
     _record_match_processing_mechanics(session=session, match=match, job=job, reason="create_job")
     session.commit()
@@ -298,6 +423,27 @@ def list_job_logs(
     rows = list(session.exec(stmt))
     items = [job_log_to_read(item).model_dump() for item in rows]
     return {"items": items}
+
+
+@router.get("/jobs/{job_id}/diagnostics", response_model=Dict[str, object])
+def get_job_diagnostics(
+    job_id: str,
+    limit: int = Query(default=80, ge=1, le=500),
+    session: Session = Depends(get_session),
+    _: UserContext = Depends(require_roles("admin", "analyst", "coach", "parent", "system", "tenant_admin")),
+    tenant: TenantContext = Depends(get_tenant_context),
+) -> Dict[str, object]:
+    job = _get_tenant_job_or_404(session, tenant.tenant_id, job_id)
+    logs = list(
+        session.exec(
+            select(JobLogEntry)
+            .where(JobLogEntry.job_id == job.id)
+            .where(JobLogEntry.tenant_id == tenant.tenant_id)
+            .order_by(JobLogEntry.created_at.desc())
+            .limit(limit)
+        )
+    )
+    return _diagnostic_summary(job, logs)
 
 
 @router.post("/jobs/{job_id}/cancel", response_model=JobRead)
@@ -444,6 +590,9 @@ def rerun_job(
             "source_job_id": job.id,
             "reason": payload.reason,
             "config_overrides": payload.config_overrides,
+            "process_message": "A rerun was queued using this match's existing source video and updated run settings.",
+            "technical_message": "Created a new ProcessingJob by merging source config with config_overrides.",
+            "log_profile": _log_profile(new_config),
         },
     )
     _record_match_processing_mechanics(

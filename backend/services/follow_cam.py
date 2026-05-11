@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import math
-import shutil
 import subprocess
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from .ffmpeg_tools import ffmpeg_available, ffmpeg_exe
 from ..utils import ensure_dir
 
 TrackSample = Tuple[float, float, float]
@@ -191,7 +191,7 @@ def _mux_audio(
     end_seconds: float,
 ) -> bool:
     cmd = [
-        "ffmpeg",
+        ffmpeg_exe(),
         "-y",
         "-hide_banner",
         "-loglevel",
@@ -289,7 +289,7 @@ def render_follow_cam_clip(
         temp_file.unlink(missing_ok=True)
         raise RuntimeError(f"Follow-cam render produced no frames for: {video_path}")
 
-    if include_audio and shutil.which("ffmpeg"):
+    if include_audio and ffmpeg_available():
         if _mux_audio(video_path, str(temp_file), str(out_file), start_s, end_s):
             temp_file.unlink(missing_ok=True)
             return str(out_file.resolve())

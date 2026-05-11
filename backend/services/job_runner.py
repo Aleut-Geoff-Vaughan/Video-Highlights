@@ -7,13 +7,14 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from sqlmodel import select
 
 from ..config import settings
 from ..database import session_scope
 from ..models import Event, Match, ProcessingJob, TrainingFeedbackBatch, TrainingRun
+from .gpu_status import get_gpu_status
 from .job_logging import append_job_log
 from ..utils import ensure_dir
 
@@ -34,6 +35,62 @@ def _read_analysis_manifest(output_dir: str) -> Dict[str, object]:
     except Exception:
         return {}
     return {}
+
+
+_LOG_PROFILE_RANK = {"standard": 0, "detailed": 1, "diagnostic": 2}
+_DETAIL_PROFILE_RANK = {"basic": 0, "detailed": 1, "extreme": 2}
+
+
+def _log_profile(config: Dict[str, Any]) -> str:
+    value = str(config.get("log_profile") or config.get("logging_profile") or "standard").strip().lower()
+    if bool(config.get("detailed_logging", False)) and value == "standard":
+        value = "detailed"
+    if value in {"off", "none", "false"}:
+        return "standard"
+    if value not in _LOG_PROFILE_RANK:
+        return "standard"
+    return value
+
+
+def _profile_allows(config: Dict[str, Any], detail_level: str) -> bool:
+    detail_rank = _DETAIL_PROFILE_RANK.get((detail_level or "basic").strip().lower(), 0)
+    return _LOG_PROFILE_RANK.get(_log_profile(config), 0) >= detail_rank
+
+
+def _append_process_log(
+    *,
+    session,
+    job: ProcessingJob,
+    config: Dict[str, Any],
+    level: str,
+    stage: str,
+    message: str,
+    process_message: str,
+    technical_message: str,
+    detail_level: str = "detailed",
+    data: Optional[Dict[str, Any]] = None,
+) -> None:
+    if detail_level != "basic" and not _profile_allows(config, detail_level):
+        return
+    payload = dict(data or {})
+    payload.update(
+        {
+            "process_message": process_message,
+            "technical_message": technical_message,
+            "log_profile": _log_profile(config),
+        }
+    )
+    append_job_log(
+        session=session,
+        job_id=job.id,
+        tenant_id=job.tenant_id,
+        level=level,
+        stage=stage,
+        message=message,
+        detail_level=detail_level,
+        data=payload,
+        force_persist=True,
+    )
 
 
 def _primary_source_asset_id(match: Match) -> Optional[str]:
@@ -269,6 +326,28 @@ class JobRunner:
                 video_path = config.get("video_path") or match.source_video_path
                 output_dir = config.get("output_dir") or os.path.join(settings.output_root, job.id)
                 ensure_dir(output_dir)
+                _append_process_log(
+                    session=session,
+                    job=job,
+                    config=config,
+                    level="info",
+                    stage="initializing",
+                    message="Run plan assembled",
+                    process_message="The worker has the game, source video path, output folder, and run options it needs to start.",
+                    technical_message="Resolved match.source_video_path/config.video_path, output_dir, execution mode, trim window, camera mode, and model config.",
+                    detail_level="detailed",
+                    data={
+                        "video_path": video_path,
+                        "output_dir": output_dir,
+                        "execution_mode": settings.job_execution_mode,
+                        "analysis_only": bool(config.get("analysis_only", False)),
+                        "camera_mode": str(config.get("camera_mode") or "wide"),
+                        "model_version": config.get("model_version"),
+                        "focus_event_types": list(config.get("focus_event_types", []) or []),
+                        "trim_start": config.get("trim_start"),
+                        "trim_end": config.get("trim_end"),
+                    },
+                )
                 append_job_log(
                     session=session,
                     job_id=job.id,
@@ -310,6 +389,22 @@ class JobRunner:
                         data={"video_path": video_path},
                     )
                     return
+                try:
+                    source_size = os.path.getsize(video_path)
+                except OSError:
+                    source_size = None
+                _append_process_log(
+                    session=session,
+                    job=job,
+                    config=config,
+                    level="info",
+                    stage="initializing",
+                    message="Source video validated",
+                    process_message="The worker can see the selected video file and will use it for this run.",
+                    technical_message="os.path.exists passed for video_path; source file size was read before invoking the processing pipeline.",
+                    detail_level="detailed",
+                    data={"video_path": video_path, "size_bytes": source_size},
+                )
 
                 job.stage = "processing_video"
                 job.progress = 0.05
@@ -377,6 +472,72 @@ class JobRunner:
 
                 video_path = config.get("video_path") or match.source_video_path
                 output_dir = config.get("output_dir") or os.path.join(settings.output_root, job.id)
+                gpu_status = get_gpu_status()
+                _append_process_log(
+                    session=session,
+                    job=job,
+                    config=config,
+                    level="info" if gpu_status.get("ready") else "warning",
+                    stage="processing_video",
+                    message="Acceleration check completed",
+                    process_message=(
+                        "GPU analysis and GPU clip rendering are ready."
+                        if gpu_status.get("ready") and gpu_status.get("rendering_ready")
+                        else "The worker checked acceleration before processing; review technical details if performance is lower than expected."
+                    ),
+                    technical_message="Checked PyTorch CUDA, nvidia-smi, and ffmpeg h264_nvenc availability.",
+                    detail_level="detailed",
+                    data=gpu_status,
+                )
+                append_job_log(
+                    session=session,
+                    job_id=job.id,
+                    tenant_id=job.tenant_id,
+                    level="info" if gpu_status.get("ready") else "warning",
+                    stage="processing_video",
+                    message="GPU readiness checked",
+                    detail_level="basic",
+                    data={
+                        "ready": gpu_status.get("ready"),
+                        "rendering_ready": gpu_status.get("rendering_ready"),
+                        "torch": gpu_status.get("torch", {}),
+                        "nvidia_smi": gpu_status.get("nvidia_smi", {}),
+                        "ffmpeg_nvenc": gpu_status.get("ffmpeg_nvenc", {}),
+                        "require_gpu": bool(config.get("require_gpu", False)),
+                    },
+                )
+
+            with session_scope() as session:
+                job = session.get(ProcessingJob, job_id)
+                if job:
+                    config = job.config_json or {}
+                    _append_process_log(
+                        session=session,
+                        job=job,
+                        config=config,
+                        level="info",
+                        stage="processing_video",
+                        message="Pipeline invocation prepared",
+                        process_message="The worker is handing the selected time window and output options to the video analysis engine.",
+                        technical_message="Calling VideoHighlights.process_video_highlights with resolved trim, GPU, sensitivity, target, camera, and ROI parameters.",
+                        detail_level="extreme",
+                        data={
+                            "pre_seconds": config.get("pre_seconds", 2.0),
+                            "post_seconds": config.get("post_seconds", 6.0),
+                            "min_clip_duration": config.get("min_clip_duration", config.get("min_clip", 4.0)),
+                            "trim_start": config.get("trim_start"),
+                            "trim_end": config.get("trim_end"),
+                            "threads": config.get("threads"),
+                            "require_gpu": bool(config.get("require_gpu", False)),
+                            "speed_sensitivity": config.get("speed_sensitivity", 2.0),
+                            "audio_sensitivity": config.get("audio_sensitivity", 2.0),
+                            "focus_event_types": list(config.get("focus_event_types", []) or []),
+                            "analysis_only": bool(config.get("analysis_only", False)),
+                            "camera_mode": str(config.get("camera_mode") or "wide"),
+                            "zoom_factor": config.get("zoom_factor", 1.6),
+                            "player_roi_enabled": isinstance(config.get("player_roi"), dict),
+                        },
+                    )
 
             success = process_video_highlights(
                 video_path=video_path,
@@ -426,6 +587,29 @@ class JobRunner:
                 match = session.get(Match, job.match_id)
                 if not match:
                     return
+                config = job.config_json or {}
+                _append_process_log(
+                    session=session,
+                    job=job,
+                    config=config,
+                    level="info" if success else "error",
+                    stage="processing_video" if success else "failed",
+                    message="Pipeline returned",
+                    process_message=(
+                        "The video engine finished and the worker is collecting bookmarks and artifacts."
+                        if success
+                        else "The video engine reported that processing did not complete successfully."
+                    ),
+                    technical_message="process_video_highlights returned; worker read analysis_bookmarks.json and scanned output directory for MP4 artifacts.",
+                    detail_level="detailed",
+                    data={
+                        "success": bool(success),
+                        "bookmarks_count": len(bookmarks),
+                        "artifact_count": len(artifacts),
+                        "analysis_manifest_path": str((Path(output_dir) / "analysis_bookmarks.json").resolve()),
+                        "output_dir": str(Path(output_dir).resolve()),
+                    },
+                )
 
                 if success:
                     created_events = _sync_job_events_from_manifest(
@@ -475,6 +659,19 @@ class JobRunner:
                             message="Bookmark analysis persisted",
                             detail_level="detailed",
                             data={"bookmarks_count": len(bookmarks), "events_created": created_events},
+                            force_persist=_profile_allows(config, "detailed"),
+                        )
+                        _append_process_log(
+                            session=session,
+                            job=job,
+                            config=config,
+                            level="info",
+                            stage="completed",
+                            message="Review data ready",
+                            process_message="Bookmarks were saved to the run result and copied into the review table for this match.",
+                            technical_message="Synced analysis manifest bookmark rows into Event records linked to the processing job.",
+                            detail_level="detailed",
+                            data={"bookmarks_count": len(bookmarks), "events_created": created_events},
                         )
                         append_job_log(
                             session=session,
@@ -485,6 +682,7 @@ class JobRunner:
                             message="Job artifacts",
                             detail_level="extreme",
                             data={"artifacts": artifacts},
+                            force_persist=_profile_allows(config, "extreme"),
                         )
                 else:
                     job.status = "failed"

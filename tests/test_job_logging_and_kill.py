@@ -71,8 +71,43 @@ def test_job_failure_produces_error_log(client: TestClient) -> None:
         assert logs.status_code == 200, logs.text
         items = logs.json()["items"]
         assert any("video path does not exist" in item["message"].lower() for item in items)
+
+        diagnostics = client.get(f"/v1/jobs/{job_id}/diagnostics")
+        assert diagnostics.status_code == 200, diagnostics.text
+        payload = diagnostics.json()
+        assert payload["severity"] == "error"
+        assert "video path" in payload["summary"].lower()
+        assert "re-register" in payload["next_action"].lower()
+        assert payload["error_logs"]
     finally:
         settings.job_log_detail = previous
+
+
+def test_run_log_profile_persists_process_and_technical_language(client: TestClient) -> None:
+    match_id = _create_match(client)
+    job = client.post(
+        f"/v1/matches/{match_id}/jobs",
+        json={"config": {"log_profile": "detailed", "analysis_only": True}},
+    )
+    assert job.status_code == 201
+    job_id = job.json()["job_id"]
+
+    run_once = client.post("/v1/jobs/worker/run-once")
+    assert run_once.status_code == 200, run_once.text
+    assert run_once.json()["job_id"] == job_id
+
+    logs = client.get(f"/v1/jobs/{job_id}/logs?limit=100")
+    assert logs.status_code == 200, logs.text
+    items = logs.json()["items"]
+    process_logs = [
+        item
+        for item in items
+        if isinstance(item.get("data"), dict)
+        and item["data"].get("process_message")
+        and item["data"].get("technical_message")
+    ]
+    assert process_logs
+    assert any(item["message"] == "Run plan assembled" for item in process_logs)
 
 
 def test_rerun_job_with_overrides_persists_processing_history(client: TestClient) -> None:

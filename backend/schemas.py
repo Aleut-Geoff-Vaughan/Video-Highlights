@@ -64,6 +64,11 @@ class MatchPatch(BaseModel):
     metadata: Optional[Dict[str, Any]] = None
 
 
+class MatchLocalAssetRegister(BaseModel):
+    path: str
+    set_as_source: bool = True
+
+
 class MatchRead(BaseModel):
     match_id: str
     tenant_id: Optional[str] = None

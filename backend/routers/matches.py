@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+from hashlib import sha1
 from typing import Any, Dict
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
@@ -8,13 +12,125 @@ from sqlmodel import Session, select
 from ..auth import UserContext, require_roles
 from ..database import get_session
 from ..models import Match
-from ..schemas import MatchCreate, MatchPatch, MatchRead
+from ..schemas import MatchCreate, MatchLocalAssetRegister, MatchPatch, MatchRead
 from ..serializers import match_to_read
+from ..services.ffmpeg_tools import ffprobe_exe
 from ..services.storage import get_storage_backend
 from ..tenant import TenantContext, get_tenant_context
 from ..utils import decode_cursor, encode_cursor, utcnow
 
 router = APIRouter(prefix="/matches", tags=["matches"])
+
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".m4v"}
+
+
+def _run_ffprobe(path: str) -> Dict[str, Any]:
+    cmd = [
+        ffprobe_exe(),
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration:stream=codec_name,width,height,r_frame_rate",
+        "-of",
+        "json",
+        path,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=20)
+    except FileNotFoundError:
+        return {"available": False, "ok": False, "error": "ffprobe was not found on PATH"}
+    except Exception as exc:
+        return {"available": True, "ok": False, "error": str(exc)}
+
+    if result.returncode != 0:
+        return {"available": True, "ok": False, "error": (result.stderr or result.stdout or "").strip()}
+
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        return {"available": True, "ok": False, "error": f"Could not parse ffprobe output: {exc}"}
+
+    streams = [item for item in list(payload.get("streams", []) or []) if isinstance(item, dict)]
+    video_stream = next((item for item in streams if item.get("width") and item.get("height")), streams[0] if streams else {})
+    duration = None
+    try:
+        duration = float((payload.get("format", {}) or {}).get("duration"))
+    except Exception:
+        duration = None
+    return {
+        "available": True,
+        "ok": True,
+        "error": None,
+        "duration_seconds": duration,
+        "width": video_stream.get("width"),
+        "height": video_stream.get("height"),
+        "codec_name": video_stream.get("codec_name"),
+        "frame_rate": video_stream.get("r_frame_rate"),
+    }
+
+
+def _inspect_local_video_path(path: str) -> Dict[str, Any]:
+    raw_path = str(path or "").strip().strip('"')
+    if not raw_path:
+        return {"ok": False, "code": "path_required", "path": "", "message": "Choose a local video file path."}
+
+    clean_path = os.path.abspath(raw_path)
+    extension = os.path.splitext(clean_path)[1].lower()
+    payload: Dict[str, Any] = {
+        "ok": False,
+        "code": "unknown",
+        "path": clean_path,
+        "filename": os.path.basename(clean_path),
+        "extension": extension,
+        "extension_ok": extension in VIDEO_EXTENSIONS,
+        "exists": os.path.exists(clean_path),
+        "is_file": os.path.isfile(clean_path),
+        "size_bytes": None,
+        "ffprobe": {},
+    }
+
+    if not payload["exists"]:
+        payload.update({"code": "not_found", "message": f"Local video file not found: {clean_path}"})
+        return payload
+    if not payload["is_file"]:
+        payload.update({"code": "not_file", "message": f"Local video path is not a file: {clean_path}"})
+        return payload
+    if not payload["extension_ok"]:
+        payload.update({"code": "bad_extension", "message": "Local video must end in .mp4, .mov, .mkv, .avi, or .m4v"})
+        return payload
+
+    try:
+        size_bytes = os.path.getsize(clean_path)
+    except OSError as exc:
+        payload.update({"code": "unreadable", "message": f"Could not read local video file: {exc}"})
+        return payload
+    payload["size_bytes"] = int(size_bytes)
+    if size_bytes <= 0:
+        payload.update(
+            {
+                "code": "zero_bytes",
+                "message": (
+                    "Windows reports this file is 0 bytes. If it is still copying, syncing, or a cloud placeholder, "
+                    "wait for the real local file to finish downloading before launching."
+                ),
+            }
+        )
+        return payload
+
+    payload["ffprobe"] = _run_ffprobe(clean_path)
+    payload.update({"ok": True, "code": "ready", "message": "Local video is readable by the API worker."})
+    return payload
+
+
+def _validate_local_video_path(path: str) -> Dict[str, Any]:
+    inspected = _inspect_local_video_path(path)
+    if not inspected.get("ok"):
+        raise HTTPException(status_code=400, detail=str(inspected.get("message") or "Local video is not ready"))
+    return {
+        "path": inspected["path"],
+        "filename": inspected["filename"],
+        "size_bytes": int(inspected["size_bytes"]),
+    }
 
 
 @router.post("", response_model=MatchRead, status_code=201)
@@ -66,6 +182,17 @@ def list_matches(
     items = [match_to_read(match) for match in rows[:limit]]
     next_cursor = encode_cursor(offset + limit) if has_more else None
     return {"items": [item.model_dump() for item in items], "next_cursor": next_cursor}
+
+
+@router.post("/assets/inspect-local", response_model=Dict[str, Any])
+def inspect_local_match_asset(
+    payload: MatchLocalAssetRegister,
+    _: UserContext = Depends(require_roles("admin", "analyst", "coach", "tenant_admin")),
+    tenant: TenantContext = Depends(get_tenant_context),
+) -> Dict[str, Any]:
+    inspected = _inspect_local_video_path(payload.path)
+    inspected["tenant_id"] = tenant.tenant_id
+    return inspected
 
 
 @router.get("/{match_id}", response_model=MatchRead)
@@ -129,6 +256,13 @@ def upload_match_asset(
     storage = get_storage_backend()
     stored = storage.save_file(file.file, key_prefix=match_id, filename=safe_name)
     file.file.close()
+    if int(stored.size_bytes or 0) <= 0:
+        if stored.backend == "local" and stored.path and os.path.exists(stored.path):
+            try:
+                os.remove(stored.path)
+            except OSError:
+                pass
+        raise HTTPException(status_code=400, detail="Uploaded video file is empty. Choose a non-empty MP4/MOV/MKV/AVI file.")
 
     assets = list((match.metadata_json or {}).get("assets", []))
     assets.append(
@@ -145,8 +279,16 @@ def upload_match_asset(
     metadata["assets"] = assets
     match.metadata_json = metadata
 
-    # Optional convenience: first upload can become source video path.
-    if not match.source_video_path:
+    # Optional convenience: first valid upload, or a replacement for a bad empty source, becomes the source video path.
+    current_source = str(match.source_video_path or "").strip()
+    current_source_missing = not current_source or not os.path.exists(current_source)
+    current_source_empty = False
+    if current_source and os.path.exists(current_source):
+        try:
+            current_source_empty = os.path.getsize(current_source) <= 0
+        except OSError:
+            current_source_empty = True
+    if current_source_missing or current_source_empty:
         match.source_video_path = stored.path
 
     match.updated_at = utcnow()
@@ -160,6 +302,56 @@ def upload_match_asset(
         "path": stored.path,
         "size_bytes": stored.size_bytes,
         "storage_backend": stored.backend,
+    }
+
+
+@router.post("/{match_id}/assets/register-local", response_model=Dict[str, Any], status_code=201)
+def register_local_match_asset(
+    match_id: str,
+    payload: MatchLocalAssetRegister,
+    session: Session = Depends(get_session),
+    _: UserContext = Depends(require_roles("admin", "analyst", "coach", "tenant_admin")),
+    tenant: TenantContext = Depends(get_tenant_context),
+) -> Dict[str, Any]:
+    match = session.get(Match, match_id)
+    if not match or match.tenant_id != tenant.tenant_id:
+        raise HTTPException(status_code=404, detail=f"Match not found: {match_id}")
+
+    local_video = _validate_local_video_path(payload.path)
+    asset_id = f"asset_local_{sha1(str(local_video['path']).encode('utf-8')).hexdigest()[:24]}"
+    asset_entry = {
+        "asset_id": asset_id,
+        "filename": local_video["filename"],
+        "path": local_video["path"],
+        "size_bytes": local_video["size_bytes"],
+        "storage_backend": "local_path",
+        "uploaded_at": utcnow().isoformat(),
+        "registered_only": True,
+    }
+
+    metadata = dict(match.metadata_json or {})
+    assets = list(metadata.get("assets", []) or [])
+    assets = [item for item in assets if item.get("asset_id") != asset_id and item.get("path") != local_video["path"]]
+    assets.append(asset_entry)
+    metadata["assets"] = assets
+    match.metadata_json = metadata
+
+    if payload.set_as_source:
+        match.source_video_path = str(local_video["path"])
+
+    match.updated_at = utcnow()
+    session.add(match)
+    session.commit()
+    session.refresh(match)
+
+    return {
+        "asset_id": asset_id,
+        "match_id": match_id,
+        "filename": local_video["filename"],
+        "path": local_video["path"],
+        "size_bytes": local_video["size_bytes"],
+        "storage_backend": "local_path",
+        "set_as_source": bool(payload.set_as_source),
     }
 
 

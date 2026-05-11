@@ -37,6 +37,7 @@ def append_job_log(
     message: str,
     detail_level: str = "basic",
     data: Optional[Dict[str, Any]] = None,
+    force_persist: bool = False,
 ) -> None:
     level_norm = (level or "info").lower()
     detail_norm = (detail_level or "basic").lower()
@@ -50,7 +51,7 @@ def append_job_log(
 
     if not settings.persist_job_logs:
         return
-    if not _detail_enabled(detail_norm):
+    if not force_persist and not _detail_enabled(detail_norm):
         return
 
     entry = JobLogEntry(

@@ -33,6 +33,8 @@ EVENT_TARGET_OPTIONS = [
     "save",
 ]
 
+LOG_PROFILE_OPTIONS = ["Standard", "Detailed", "Diagnostic"]
+
 ANNOUNCEMENTS = [
     {
         "title": "Model Upgrade Workflow Active",
@@ -364,6 +366,32 @@ input, textarea, [data-baseweb="select"] > div {
   background: #fcecec;
 }
 
+.share-link-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .5rem;
+  margin: .2rem 0 .55rem 0;
+}
+
+.share-link-row a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2rem;
+  padding: .32rem .65rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--brand);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.share-link-row a:hover {
+  border-color: var(--brand);
+  background: #eef8fb;
+  text-decoration: none;
+}
+
 @media (max-width: 900px) {
   .portal-header {
     align-items: flex-start;
@@ -402,14 +430,29 @@ def api_request(
     if token.strip():
         headers["Authorization"] = f"Bearer {token.strip()}"
     url = f"{api_base.rstrip('/')}{path}"
-    response = requests.request(
-        method=method.upper(),
-        url=url,
-        headers=headers,
-        json=json_body,
-        files=files,
-        timeout=timeout,
-    )
+    try:
+        response = requests.request(
+            method=method.upper(),
+            url=url,
+            headers=headers,
+            json=json_body,
+            files=files,
+            timeout=timeout,
+        )
+    except requests.RequestException as exc:
+        return {
+            "ok": False,
+            "status_code": 0,
+            "payload": {
+                "error": "connection_error",
+                "message": str(exc),
+                "url": url,
+                "hint": (
+                    "Use http://127.0.0.1:8000/v1 when running the portal locally. "
+                    "The http://api:8000/v1 hostname only works inside Docker Compose."
+                ),
+            },
+        }
     return _as_json(response)
 
 
@@ -435,6 +478,42 @@ def list_training_models(api_base: str, tenant_id: str, token: str) -> List[Dict
         return []
     payload = result["payload"] or []
     return list(payload)
+
+
+def get_gpu_health(api_base: str, tenant_id: str, token: str) -> Dict[str, Any]:
+    result = api_request("GET", api_base, "/health/gpu", tenant_id, token, timeout=15)
+    if not result["ok"]:
+        return {"ready": False, "error": result.get("payload"), "torch": {}, "nvidia_smi": {}, "ffmpeg_nvenc": {}}
+    payload = result["payload"] or {}
+    return dict(payload) if isinstance(payload, dict) else {"ready": False, "error": payload}
+
+
+def inspect_local_video(api_base: str, tenant_id: str, token: str, path: str) -> Dict[str, Any]:
+    result = api_request(
+        "POST",
+        api_base,
+        "/matches/assets/inspect-local",
+        tenant_id,
+        token,
+        json_body={"path": path, "set_as_source": False},
+        timeout=30,
+    )
+    if not result["ok"]:
+        payload = result.get("payload") or {}
+        if isinstance(payload, dict):
+            message = (
+                ((payload.get("error") or {}) if isinstance(payload.get("error"), dict) else {}).get("message")
+                or payload.get("detail")
+                or payload.get("message")
+                or str(payload)
+            )
+        else:
+            message = str(payload)
+        fallback = _local_video_probe(path)
+        fallback.update({"ok": False, "code": "api_inspect_failed", "message": f"API could not inspect local path: {message}"})
+        return fallback
+    payload = result["payload"] or {}
+    return dict(payload) if isinstance(payload, dict) else {"ok": False, "code": "bad_response", "message": str(payload)}
 
 
 def list_match_events(
@@ -487,6 +566,14 @@ def list_job_bookmarks(
     }
 
 
+def get_job_diagnostics(api_base: str, tenant_id: str, token: str, job_id: str) -> Dict[str, Any]:
+    result = api_request("GET", api_base, f"/jobs/{job_id}/diagnostics", tenant_id, token, timeout=30)
+    if not result["ok"]:
+        return {"ok": False, "summary": "Diagnostics unavailable.", "next_action": str(result.get("payload"))}
+    payload = result["payload"] or {}
+    return dict(payload) if isinstance(payload, dict) else {"ok": False, "summary": str(payload), "next_action": ""}
+
+
 def _iso_to_short(value: Optional[str]) -> str:
     if not value:
         return "-"
@@ -516,6 +603,97 @@ def _seconds_to_clock(value: float) -> str:
     minutes = (total % 3600) // 60
     seconds = total % 60
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def _float_or_none(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str) and value.strip():
+        text = value.strip()
+        if ":" in text:
+            try:
+                parts = [float(part) for part in text.split(":")]
+            except ValueError:
+                return None
+            if len(parts) == 3:
+                return (parts[0] * 3600.0) + (parts[1] * 60.0) + parts[2]
+            if len(parts) == 2:
+                return (parts[0] * 60.0) + parts[1]
+        try:
+            return float(text)
+        except ValueError:
+            return None
+    return None
+
+
+def _format_trim_window(config: Dict[str, Any]) -> str:
+    trim_start = _float_or_none((config or {}).get("trim_start"))
+    trim_end = _float_or_none((config or {}).get("trim_end"))
+    if trim_start is None and trim_end is None:
+        return "full game"
+    start = trim_start or 0.0
+    if trim_end is None:
+        return f"{_seconds_to_clock(start)} - end"
+    return f"{_seconds_to_clock(start)} - {_seconds_to_clock(trim_end)}"
+
+
+def _render_trim_window_controls(
+    *,
+    context_key: str,
+    config: Optional[Dict[str, Any]] = None,
+    default_enabled: bool = False,
+    default_duration_minutes: float = 2.0,
+) -> Dict[str, Any]:
+    source_config = config or {}
+    existing_start = _float_or_none(source_config.get("trim_start"))
+    existing_end = _float_or_none(source_config.get("trim_end"))
+    has_existing_window = existing_start is not None or existing_end is not None
+    start_default = max(0.0, (existing_start or 0.0) / 60.0)
+    if existing_end is not None and existing_end > (existing_start or 0.0):
+        duration_default = max(0.25, (existing_end - (existing_start or 0.0)) / 60.0)
+    else:
+        duration_default = default_duration_minutes
+
+    enabled = st.checkbox(
+        "Limit to test window",
+        value=has_existing_window or default_enabled,
+        key=f"{context_key}_trim_enabled",
+        help="Process only a short section first. Leave this on for smoke tests before running an entire full-match file.",
+    )
+    trim_col1, trim_col2, trim_col3 = st.columns([1.0, 1.0, 1.2])
+    start_minutes = trim_col1.number_input(
+        "Start Minute",
+        min_value=0.0,
+        max_value=720.0,
+        value=round(float(start_default), 2),
+        step=0.5,
+        disabled=not enabled,
+        key=f"{context_key}_trim_start_minutes",
+    )
+    duration_minutes = trim_col2.number_input(
+        "Duration Minutes",
+        min_value=0.25,
+        max_value=240.0,
+        value=round(float(duration_default), 2),
+        step=0.25,
+        disabled=not enabled,
+        key=f"{context_key}_trim_duration_minutes",
+    )
+    trim_start = round(float(start_minutes) * 60.0, 3)
+    trim_end = round(trim_start + (float(duration_minutes) * 60.0), 3)
+    label = f"{_seconds_to_clock(trim_start)} - {_seconds_to_clock(trim_end)}" if enabled else "full game"
+    trim_col3.metric("Processing Window", label)
+    if enabled:
+        st.caption("Smoke-test mode is active. This run will only analyze the selected slice of the video.")
+
+    return {
+        "enabled": bool(enabled),
+        "trim_start": trim_start if enabled else None,
+        "trim_end": trim_end if enabled else None,
+        "label": label,
+    }
 
 
 def _resolve_match_video_source(match: Dict[str, Any]) -> str:
@@ -608,6 +786,7 @@ def _render_player_roi_selector(
     existing_roi: Optional[Dict[str, Any]] = None,
     source_video_path: str = "",
     upload_bytes: Optional[bytes] = None,
+    upload_file: Any = None,
     upload_name: str = "",
 ) -> Dict[str, Any]:
     enabled = st.checkbox(
@@ -621,7 +800,9 @@ def _render_player_roi_selector(
 
     suffix = os.path.splitext(upload_name or source_video_path or "preview.mp4")[1] or ".mp4"
     preview_payload: Dict[str, Any] = {}
-    if upload_bytes:
+    if upload_file is not None:
+        preview_payload = _extract_first_frame_from_video_bytes(upload_file.getvalue(), suffix)
+    elif upload_bytes:
         preview_payload = _extract_first_frame_from_video_bytes(upload_bytes, suffix)
     elif source_video_path:
         preview_payload = _extract_first_frame_from_video_path(source_video_path)
@@ -829,6 +1010,88 @@ def _build_stage_tracker(current_stage: Optional[str], status: Optional[str]) ->
     return "".join(chips)
 
 
+def _render_job_diagnostics_panel(diagnostics: Dict[str, Any], is_technical: bool) -> None:
+    summary = str(diagnostics.get("summary") or "Diagnostics unavailable.")
+    next_action = str(diagnostics.get("next_action") or "").strip()
+    severity = str(diagnostics.get("severity") or "info").lower()
+    status = str(diagnostics.get("status") or "-")
+    stage = str(diagnostics.get("stage") or "-")
+    progress = float(diagnostics.get("progress", 0.0) or 0.0)
+
+    if severity == "error":
+        st.error(summary)
+    elif severity == "warning":
+        st.warning(summary)
+    elif severity == "success":
+        st.success(summary)
+    else:
+        st.info(summary)
+
+    if next_action:
+        st.write(f"Next: {next_action}")
+
+    diag_col1, diag_col2, diag_col3, diag_col4 = st.columns(4)
+    diag_col1.metric("Status", status)
+    diag_col2.metric("Stage", stage)
+    diag_col3.metric("Progress", f"{int(round(progress * 100))}%")
+    result_summary = diagnostics.get("result_summary") if isinstance(diagnostics.get("result_summary"), dict) else {}
+    diag_col4.metric("Bookmarks", int(result_summary.get("bookmarks_count", 0) or 0))
+
+    issue_logs = list(diagnostics.get("error_logs") or []) + list(diagnostics.get("warning_logs") or [])
+    if issue_logs:
+        rows = [
+            {
+                "level": item.get("level"),
+                "stage": item.get("stage"),
+                "process": ((item.get("data") or {}) if isinstance(item.get("data"), dict) else {}).get("process_message")
+                or item.get("message"),
+                "technical": ((item.get("data") or {}) if isinstance(item.get("data"), dict) else {}).get("technical_message")
+                or "",
+                "created_at": _iso_to_short(item.get("created_at")),
+            }
+            for item in issue_logs[:8]
+            if isinstance(item, dict)
+        ]
+        if rows:
+            st.dataframe(rows, use_container_width=True, hide_index=True)
+
+    if is_technical:
+        with st.expander("Recent Logs", expanded=False):
+            recent_rows = [
+                {
+                    "level": item.get("level"),
+                    "stage": item.get("stage"),
+                    "detail": item.get("detail_level"),
+                    "process": ((item.get("data") or {}) if isinstance(item.get("data"), dict) else {}).get("process_message")
+                    or item.get("message"),
+                    "technical": ((item.get("data") or {}) if isinstance(item.get("data"), dict) else {}).get("technical_message")
+                    or "",
+                    "created_at": _iso_to_short(item.get("created_at")),
+                }
+                for item in list(diagnostics.get("recent_logs") or [])
+                if isinstance(item, dict)
+            ]
+            if recent_rows:
+                st.dataframe(recent_rows, use_container_width=True, hide_index=True)
+            else:
+                st.caption("No logs yet.")
+
+
+def _render_job_outcome_notice(job: Dict[str, Any]) -> None:
+    status = str(job.get("status") or "").lower()
+    result = job.get("result", {}) if isinstance(job.get("result"), dict) else {}
+    bookmarks_count = int(result.get("bookmarks_count", 0) or 0)
+    error_message = str(job.get("error_message") or "").strip()
+    if status == "failed":
+        st.error(error_message or "This run failed. Open Run Monitor for diagnostics and logs.")
+    elif status == "canceled":
+        st.warning(error_message or "This run was canceled.")
+    elif status == "completed" and bookmarks_count <= 0:
+        st.warning("Run completed, but no bookmarks were detected. Try a longer test window or broader targets.")
+    elif status == "completed":
+        st.success(f"Run completed with {bookmarks_count} bookmarks.")
+
+
 def _profile_defaults(profile_name: str, selected_targets: List[str]) -> Dict[str, Any]:
     profile = profile_name.lower()
     defaults: Dict[str, Any] = {
@@ -869,6 +1132,7 @@ def _recommended_job_config() -> Dict[str, Any]:
         "no_audio": False,
         "require_gpu": False,
         "analysis_only": True,
+        "log_profile": "detailed",
     }
 
 
@@ -903,6 +1167,115 @@ def safe_rerun() -> None:
 
 def _h(value: Any) -> str:
     return escape(str(value or ""), quote=True)
+
+
+def _format_file_size(size_bytes: Any) -> str:
+    try:
+        size = float(size_bytes or 0)
+    except Exception:
+        size = 0.0
+    units = ["B", "KB", "MB", "GB", "TB"]
+    unit_index = 0
+    while size >= 1024.0 and unit_index < len(units) - 1:
+        size /= 1024.0
+        unit_index += 1
+    if unit_index == 0:
+        return f"{int(size)} {units[unit_index]}"
+    return f"{size:.1f} {units[unit_index]}"
+
+
+def _format_media_probe_summary(probe: Dict[str, Any]) -> str:
+    parts = []
+    ffprobe = probe.get("ffprobe") if isinstance(probe.get("ffprobe"), dict) else {}
+    duration = ffprobe.get("duration_seconds")
+    try:
+        if duration is not None:
+            parts.append(f"duration {_seconds_to_clock(float(duration))}")
+    except Exception:
+        pass
+    width = ffprobe.get("width")
+    height = ffprobe.get("height")
+    if width and height:
+        parts.append(f"{width}x{height}")
+    codec = str(ffprobe.get("codec_name") or "").strip()
+    if codec:
+        parts.append(codec)
+    if ffprobe and not ffprobe.get("ok") and ffprobe.get("error"):
+        parts.append(f"ffprobe: {ffprobe.get('error')}")
+    return " | ".join(parts)
+
+
+def _local_video_probe(path: str) -> Dict[str, Any]:
+    clean_path = str(path or "").strip().strip('"')
+    if not clean_path:
+        return {"ok": False, "code": "path_required", "path": "", "message": "Choose a local video file path."}
+    if not os.path.isfile(clean_path):
+        return {"ok": False, "code": "not_found", "path": clean_path, "message": "Local video file was not found."}
+    try:
+        size_bytes = os.path.getsize(clean_path)
+    except OSError as exc:
+        return {"ok": False, "code": "unreadable", "path": clean_path, "message": f"Could not read local file size: {exc}"}
+    if size_bytes <= 0:
+        return {
+            "ok": False,
+            "code": "zero_bytes",
+            "path": clean_path,
+            "size_bytes": size_bytes,
+            "message": (
+                "Windows reports this file is 0 bytes. If it is still copying, syncing, or a cloud placeholder, "
+                "wait for the real local file to finish downloading before launching."
+            ),
+        }
+    extension = os.path.splitext(clean_path)[1].lower()
+    if extension not in {".mp4", ".mov", ".mkv", ".avi", ".m4v"}:
+        return {
+            "ok": False,
+            "code": "bad_extension",
+            "path": clean_path,
+            "size_bytes": size_bytes,
+            "message": "Use a video file ending in .mp4, .mov, .mkv, .avi, or .m4v.",
+        }
+    return {"ok": True, "code": "ready", "path": clean_path, "size_bytes": size_bytes, "message": "Local video ready."}
+
+
+def _choose_local_video_file(initial_path: str = "") -> Dict[str, str]:
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except Exception as exc:
+        return {"path": "", "error": f"Native file chooser is unavailable: {exc}"}
+
+    initial_dir = ""
+    clean_initial = str(initial_path or "").strip().strip('"')
+    if clean_initial:
+        initial_dir = clean_initial if os.path.isdir(clean_initial) else os.path.dirname(clean_initial)
+    if not initial_dir or not os.path.isdir(initial_dir):
+        initial_dir = os.path.expanduser("~")
+
+    root = None
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        root.update()
+        selected = filedialog.askopenfilename(
+            parent=root,
+            title="Choose local match video",
+            initialdir=initial_dir,
+            filetypes=[
+                ("Video files", "*.mp4 *.mov *.mkv *.avi *.m4v"),
+                ("All files", "*.*"),
+            ],
+        )
+        return {"path": str(selected or ""), "error": ""}
+    except Exception as exc:
+        return {"path": "", "error": f"Could not open native file chooser: {exc}"}
+    finally:
+        if root is not None:
+            try:
+                root.destroy()
+            except Exception:
+                pass
 
 
 def _flatten_query_value(value: Any) -> str:
@@ -990,6 +1363,31 @@ def _extract_entity_id_from_ref(reference: str, prefix: str) -> str:
     return ""
 
 
+def _studio_match_selector_label(match: Dict[str, Any]) -> str:
+    return (
+        f"{(match.get('name') or match.get('match_id'))} | "
+        f"{match.get('home_team_name') or '?'} vs {match.get('away_team_name') or '?'} | "
+        f"{match.get('match_date') or '-'}"
+    )
+
+
+def _library_match_selector_label(row: Dict[str, Any]) -> str:
+    return f"{row['game']} | {row['date']} | {row['latest_status']}"
+
+
+def _option_label_for_entity_id(options_by_label: Dict[str, Any], entity_id: str) -> Tuple[str, int]:
+    target_id = str(entity_id or "").strip()
+    if not target_id:
+        return "", 0
+    for idx, (label, value) in enumerate(options_by_label.items()):
+        if str(value) == target_id:
+            return label, idx
+        if isinstance(value, dict):
+            if str(value.get("match_id") or value.get("job_id") or "") == target_id:
+                return label, idx
+    return "", 0
+
+
 def _apply_url_state_to_session() -> None:
     query_params = _read_query_params()
     signature = "&".join(
@@ -1050,6 +1448,7 @@ def _apply_url_state_to_session() -> None:
     match_id = _extract_entity_id_from_ref(match_ref, "match")
     if match_id:
         st.session_state.selected_match_id = match_id
+        st.session_state.portal_pending_match_select_id = match_id
         if "--" in match_ref:
             raw_label = match_ref.split("--", 1)[0]
             if raw_label and raw_label not in {"match", "run", "job"}:
@@ -1059,6 +1458,7 @@ def _apply_url_state_to_session() -> None:
     job_id = _extract_entity_id_from_ref(job_ref, "job")
     if job_id:
         st.session_state.selected_job_id = job_id
+        st.session_state.portal_pending_job_select_id = job_id
         st.session_state.portal_auto_fetch_job_id = job_id
 
     seek_ref = str(query_params.get("seek") or "").strip()
@@ -1071,6 +1471,8 @@ def _apply_url_state_to_session() -> None:
     bookmark_ref = str(query_params.get("bookmark") or "").strip()
     if bookmark_ref:
         st.session_state.portal_deeplink_bookmark = bookmark_ref
+        st.session_state.portal_pending_workspace_view = "Review"
+        st.session_state.portal_studio_focus_review = True
 
 
 def _view_code_from_nav(nav_key: str, is_technical: bool) -> str:
@@ -1100,10 +1502,10 @@ def _build_portal_query_params(
     tenant_clean = str(tenant_id or "").strip()
     if tenant_clean:
         params["tenant"] = tenant_clean
-    match_clean = str(match_id or "").strip()
+    match_clean = _extract_entity_id_from_ref(str(match_id or "").strip(), "match")
     if match_clean:
         params["match"] = _build_entity_ref(match_clean, match_label)
-    job_clean = str(job_id or "").strip()
+    job_clean = _extract_entity_id_from_ref(str(job_id or "").strip(), "job")
     if job_clean:
         params["job"] = _build_entity_ref(job_clean, "run")
     if int(seek_s or 0) > 0:
@@ -1176,19 +1578,26 @@ def _render_match_bookmark_review(
     }
     labels = list(job_picker.keys())
     previous_job_id = str(st.session_state.get("selected_job_id", "")).strip()
-    default_job_id = previous_job_id
-    default_index = 0
-    if default_job_id:
-        for idx, label in enumerate(labels):
-            if str(job_picker[label].get("job_id")) == default_job_id:
-                default_index = idx
-                break
+    pending_job_id = _extract_entity_id_from_ref(
+        str(st.session_state.get("portal_pending_job_select_id", "") or ""),
+        "job",
+    )
+    default_job_id = pending_job_id or _extract_entity_id_from_ref(previous_job_id, "job")
+    desired_job_label, default_index = _option_label_for_entity_id(job_picker, default_job_id)
+    review_job_key = f"{context_key}_review_job"
+    current_job_label = str(st.session_state.get(review_job_key, "") or "")
+    if desired_job_label and (pending_job_id or current_job_label not in labels):
+        st.session_state[review_job_key] = desired_job_label
+        if pending_job_id:
+            st.session_state.portal_pending_job_select_id = ""
+    elif current_job_label and current_job_label not in labels and labels:
+        st.session_state[review_job_key] = labels[default_index]
 
     selected_job_label = st.selectbox(
         "Bookmark Source Job",
         labels,
         index=default_index,
-        key=f"{context_key}_review_job",
+        key=review_job_key,
     )
     selected_job = job_picker[selected_job_label]
     selected_job_id = str(selected_job.get("job_id"))
@@ -1293,9 +1702,29 @@ def _render_match_bookmark_review(
             if selected_event_id:
                 bookmark_params["bookmark"] = selected_event_id
 
+            review_link = _build_portal_share_link(share_params)
+            bookmark_link = _build_portal_share_link(bookmark_params)
             st.caption("Share Links")
-            st.code(_build_portal_share_link(share_params), language="text")
-            st.code(_build_portal_share_link(bookmark_params), language="text")
+            st.markdown(
+                f"""
+<div class="share-link-row">
+  <a href="{_h(review_link)}" target="_self">Open selected run</a>
+  <a href="{_h(bookmark_link)}" target="_self">Open selected bookmark</a>
+</div>
+""",
+                unsafe_allow_html=True,
+            )
+            link_col1, link_col2 = st.columns(2)
+            link_col1.text_input(
+                "Run link",
+                value=review_link,
+                key=f"{context_key}_share_review_{selected_match_id}_{selected_job_id}",
+            )
+            link_col2.text_input(
+                "Bookmark link",
+                value=bookmark_link,
+                key=f"{context_key}_share_bookmark_{selected_match_id}_{selected_job_id}",
+            )
 
             st.caption("On-demand bookmark clip (frame-accurate extract from source video)")
             clip_col1, clip_col2 = st.columns(2)
@@ -1580,6 +2009,10 @@ if "selected_job_id" not in st.session_state:
     st.session_state.selected_job_id = ""
 if "selected_match_label" not in st.session_state:
     st.session_state.selected_match_label = ""
+if "portal_pending_match_select_id" not in st.session_state:
+    st.session_state.portal_pending_match_select_id = ""
+if "portal_pending_job_select_id" not in st.session_state:
+    st.session_state.portal_pending_job_select_id = ""
 if "portal_video_seek_s" not in st.session_state:
     st.session_state.portal_video_seek_s = 0
 if "portal_preview_clip_source" not in st.session_state:
@@ -1608,16 +2041,44 @@ if "portal_selected_bookmark_ref" not in st.session_state:
     st.session_state.portal_selected_bookmark_ref = ""
 if "portal_studio_focus_review" not in st.session_state:
     st.session_state.portal_studio_focus_review = False
+if "portal_studio_workspace_view" not in st.session_state:
+    st.session_state.portal_studio_workspace_view = "Overview"
+if "portal_pending_workspace_view" not in st.session_state:
+    st.session_state.portal_pending_workspace_view = ""
 
 _apply_url_state_to_session()
 
 with st.sidebar:
     st.header("Workspace")
-    api_base_default = os.getenv("VH_PORTAL_API_BASE", "http://api:8000/v1")
+    env_api_base = os.getenv("VH_PORTAL_API_BASE", "").strip()
+    api_base_default = env_api_base or "http://127.0.0.1:8000/v1"
+    if not env_api_base and str(st.session_state.get("portal_api_base", "")).rstrip("/") == "http://api:8000/v1":
+        st.session_state.portal_api_base = api_base_default
     tenant_default = os.getenv("VH_PORTAL_TENANT", "sandbox")
     api_base = st.text_input("API Base URL", value=api_base_default, key="portal_api_base")
+    if "://api:" in api_base:
+        st.warning("`api` is the Docker Compose hostname. For local Windows runs, use `http://127.0.0.1:8000/v1`.")
     tenant_id = st.text_input("Tenant", value=tenant_default, key="portal_tenant")
     token = st.text_input("Bearer Token", value="", type="password", key="portal_token")
+    gpu_health = get_gpu_health(api_base, tenant_id, token)
+    st.session_state.portal_gpu_ready = bool(gpu_health.get("ready"))
+    torch_info = dict(gpu_health.get("torch", {}) or {})
+    nvidia_info = dict(gpu_health.get("nvidia_smi", {}) or {})
+    nvenc_info = dict(gpu_health.get("ffmpeg_nvenc", {}) or {})
+    gpu_names = []
+    if isinstance(torch_info.get("devices"), list):
+        gpu_names = [str(item) for item in torch_info.get("devices", []) if str(item).strip()]
+    if not gpu_names and isinstance(nvidia_info.get("gpus"), list):
+        gpu_names = [str(item.get("name")) for item in nvidia_info.get("gpus", []) if isinstance(item, dict) and item.get("name")]
+    if st.session_state.portal_gpu_ready:
+        st.success(f"GPU ready: {gpu_names[0] if gpu_names else 'CUDA available'}")
+    else:
+        st.warning("GPU not ready for PyTorch CUDA. Check `/v1/health/gpu`.")
+    if st.session_state.portal_gpu_ready and nvenc_info:
+        if nvenc_info.get("available"):
+            st.caption("NVENC clip rendering: ready")
+        else:
+            st.caption("NVENC clip rendering: not detected; clips will fall back to CPU encoding.")
     experience_mode = st.radio(
         "Experience",
         ["User Friendly", "Technical"],
@@ -1821,104 +2282,45 @@ if nav_key == "Portal Home":
         if not filtered_snapshots:
             st.info("No games match the current filters.")
         else:
-            st.subheader("Game Library")
-            card_cols = st.columns(3)
-            for idx, (match, latest) in enumerate(filtered_snapshots[:90]):
-                match_id = str(match.get("match_id"))
-                game_name = str(match.get("name") or match_id)
-                teams = f"{match.get('home_team_name') or '?'} vs {match.get('away_team_name') or '?'}"
-                match_date = str(match.get("match_date") or "-")
-                latest_status = str((latest or {}).get("status", "no_runs"))
-                latest_model = str((latest or {}).get("config", {}).get("model_version", "-"))
-                latest_camera = str((latest or {}).get("config", {}).get("camera_mode", "wide"))
-                latest_targets = _focus_targets_from_config((latest or {}).get("config", {}))
-                latest_bookmarks = int((latest or {}).get("result", {}).get("bookmarks_count", 0) or 0)
+            st.subheader("Selected Game")
+            library_rows: List[Dict[str, Any]] = []
+            for match, latest in filtered_snapshots[:90]:
+                library_rows.append(
+                    {
+                        "game": match.get("name") or match.get("match_id"),
+                        "date": match.get("match_date") or "-",
+                        "teams": f"{match.get('home_team_name') or '?'} vs {match.get('away_team_name') or '?'}",
+                        "status": (latest or {}).get("status", "no_runs"),
+                        "bookmarks": int((latest or {}).get("result", {}).get("bookmarks_count", 0) or 0),
+                        "window": _format_trim_window((latest or {}).get("config", {}) or {}),
+                    }
+                )
+            list_height = min(300, 58 + (len(library_rows) * 34))
+            with st.expander(f"Browse library ({len(library_rows)} games)", expanded=False):
+                st.dataframe(
+                    library_rows,
+                    use_container_width=True,
+                    hide_index=True,
+                    height=list_height,
+                )
 
-                chip_classes = "studio-chip"
-                if latest_status in {"running", "claimed", "queued", "cancel_requested"}:
-                    chip_classes = "studio-chip live"
-                elif latest_status == "completed":
-                    chip_classes = "studio-chip good"
-                elif latest_status in {"failed", "canceled"}:
-                    chip_classes = "studio-chip bad"
-
-                with card_cols[idx % 3]:
-                    st.markdown(
-                        f"""
-<div class="studio-card">
-  <h4>{_h(game_name)}</h4>
-  <p class="studio-muted">{_h(teams)}</p>
-  <p class="studio-muted">Date: {_h(match_date)}</p>
-  <span class="{chip_classes}">{_h(latest_status)}</span>
-  <span class="studio-chip">model: {_h(latest_model)}</span>
-  <span class="studio-chip">camera: {_h(latest_camera)}</span>
-  <span class="studio-chip">bookmarks: {latest_bookmarks}</span>
-  <p class="studio-muted">targets: {_h(latest_targets)}</p>
-</div>
-""",
-                        unsafe_allow_html=True,
-                    )
-                    action_col1, action_col2, action_col3 = st.columns(3)
-                    if action_col1.button("Open", key=f"studio_open_match_{match_id}"):
-                        st.session_state.selected_match_id = match_id
-                        st.session_state.selected_match_label = game_name
-                        st.session_state.portal_studio_focus_review = False
-                        safe_rerun()
-
-                    if action_col2.button("Review", key=f"studio_review_match_{match_id}"):
-                        st.session_state.selected_match_id = match_id
-                        st.session_state.selected_match_label = game_name
-                        latest_job_id = str((latest or {}).get("job_id") or "").strip()
-                        if latest_job_id:
-                            st.session_state.selected_job_id = latest_job_id
-                        st.session_state.portal_studio_focus_review = True
-                        st.session_state.portal_flash_message = "Match selected. Opening Review & Bookmarks."
-                        safe_rerun()
-
-                    source_video = _resolve_match_video_source(match)
-                    if action_col3.button(
-                        "Analyze",
-                        key=f"studio_new_run_{match_id}",
-                        disabled=not bool(source_video),
-                    ):
-                        base_config = dict((latest or {}).get("config", {}) or _recommended_job_config())
-                        base_config["run_created_at"] = datetime.utcnow().isoformat()
-                        base_config["run_created_from"] = "studio_card_quick_launch"
-                        create_result = api_request(
-                            "POST",
-                            api_base,
-                            f"/matches/{match_id}/jobs",
-                            tenant_id,
-                            token,
-                            json_body={"config": base_config},
-                        )
-                        if not create_result["ok"]:
-                            st.error(f"Failed to queue analysis for {game_name}: {create_result['payload']}")
-                        else:
-                            new_job_id = str(create_result["payload"]["job_id"])
-                            st.session_state.selected_match_id = match_id
-                            st.session_state.selected_match_label = game_name
-                            st.session_state.selected_job_id = new_job_id
-                            st.session_state.portal_studio_focus_review = False
-                            st.session_state.portal_auto_fetch_job_id = new_job_id
-                            st.session_state.portal_pending_nav = monitor_nav_label
-                            st.session_state.portal_flash_message = f"Analysis queued for {game_name} ({new_job_id})."
-                            safe_rerun()
-
-            selector = {
-                f"{(m.get('name') or m.get('match_id'))} | {m.get('home_team_name') or '?'} vs {m.get('away_team_name') or '?'} | {m.get('match_date') or '-'}": m.get("match_id")
-                for m, _ in filtered_snapshots
-            }
+            selector = {_studio_match_selector_label(m): str(m.get("match_id")) for m, _ in filtered_snapshots}
             selector_labels = list(selector.keys())
-            default_match_id = str(st.session_state.selected_match_id or "")
-            default_idx = 0
-            if default_match_id:
-                for idx, label in enumerate(selector_labels):
-                    if str(selector[label]) == default_match_id:
-                        default_idx = idx
-                        break
+            default_match_id = _extract_entity_id_from_ref(str(st.session_state.selected_match_id or ""), "match")
+            pending_match_id = _extract_entity_id_from_ref(
+                str(st.session_state.get("portal_pending_match_select_id", "") or ""),
+                "match",
+            )
+            desired_label, default_idx = _option_label_for_entity_id(selector, pending_match_id or default_match_id)
+            current_selector_label = str(st.session_state.get("portal_studio_active_match", "") or "")
+            if desired_label and (pending_match_id or current_selector_label not in selector_labels):
+                st.session_state.portal_studio_active_match = desired_label
+                if pending_match_id:
+                    st.session_state.portal_pending_match_select_id = ""
+            elif current_selector_label and current_selector_label not in selector_labels and selector_labels:
+                st.session_state.portal_studio_active_match = selector_labels[default_idx]
             selected_label = st.selectbox(
-                "Active Match Workspace",
+                "Open Game",
                 selector_labels,
                 index=default_idx,
                 key="portal_studio_active_match",
@@ -1931,38 +2333,27 @@ if nav_key == "Portal Home":
             jobs = list_match_jobs(api_base, tenant_id, token, selected_match_id, limit=200)
 
             if selected_match:
-                st.subheader(f"Match Analysis: {selected_match.get('name') or selected_match_id}")
-                workspace_tabs = st.tabs(["Overview", "Live Analysis", "Runs", "Exports", "Assistant"])
+                st.subheader(f"Workspace: {selected_match.get('name') or selected_match_id}")
+                if bool(st.session_state.portal_studio_focus_review):
+                    st.session_state.portal_pending_workspace_view = "Review"
+                    st.session_state.portal_studio_focus_review = False
+                workspace_options = ["Overview", "Review", "Live", "Runs", "Exports", "Assistant"]
+                pending_workspace_view = str(st.session_state.get("portal_pending_workspace_view", "") or "")
+                if pending_workspace_view in workspace_options:
+                    st.session_state.portal_studio_workspace_view = pending_workspace_view
+                    st.session_state.portal_pending_workspace_view = ""
+                if str(st.session_state.get("portal_studio_workspace_view", "")) not in workspace_options:
+                    st.session_state.portal_studio_workspace_view = "Overview"
+                workspace_view = st.radio(
+                    "Workspace View",
+                    workspace_options,
+                    horizontal=True,
+                    key="portal_studio_workspace_view",
+                )
                 latest_job = _latest_job(jobs)
                 source_video = _resolve_match_video_source(selected_match)
 
-                if bool(st.session_state.portal_studio_focus_review):
-                    st.subheader("Review & Bookmarks")
-                    review_col1, review_col2 = st.columns([1.3, 1.0])
-                    review_col1.caption("Direct review mode. Jump bookmarks, render clips, and export without nested tabs.")
-                    if review_col2.button(
-                        "Close Review Mode",
-                        key=f"studio_review_close_{selected_match_id}",
-                        use_container_width=True,
-                    ):
-                        st.session_state.portal_studio_focus_review = False
-                        safe_rerun()
-
-                    _render_match_bookmark_review(
-                        context_key="studio_review_focus",
-                        api_base=api_base,
-                        tenant_id=tenant_id,
-                        token=token,
-                        selected_match=selected_match,
-                        selected_match_id=selected_match_id,
-                        jobs=jobs,
-                        is_technical=is_technical,
-                        mode_code="technical" if is_technical else "user",
-                        view_code="studio",
-                    )
-                    st.divider()
-
-                with workspace_tabs[0]:
+                if workspace_view == "Overview":
                     ov_col1, ov_col2, ov_col3, ov_col4 = st.columns(4)
                     ov_col1.metric("Total Runs", len(jobs))
                     ov_col2.metric(
@@ -2002,7 +2393,9 @@ if nav_key == "Portal Home":
                         else:
                             new_job_id = str(create_result["payload"]["job_id"])
                             st.session_state.selected_job_id = new_job_id
+                            st.session_state.portal_pending_job_select_id = new_job_id
                             st.session_state.portal_studio_focus_review = False
+                            st.session_state.portal_pending_workspace_view = "Live"
                             st.session_state.portal_auto_fetch_job_id = new_job_id
                             st.session_state.portal_pending_nav = monitor_nav_label
                             st.session_state.portal_flash_message = f"Analysis queued. job_id={new_job_id}"
@@ -2020,7 +2413,12 @@ if nav_key == "Portal Home":
                         use_container_width=True,
                         disabled=not bool(jobs),
                     ):
+                        latest_job_id = str((latest_job or {}).get("job_id") or "").strip()
+                        if latest_job_id:
+                            st.session_state.selected_job_id = latest_job_id
+                            st.session_state.portal_pending_job_select_id = latest_job_id
                         st.session_state.portal_studio_focus_review = True
+                        st.session_state.portal_pending_workspace_view = "Review"
                         safe_rerun()
 
                     if source_video:
@@ -2046,7 +2444,21 @@ if nav_key == "Portal Home":
                                 hide_index=True,
                             )
 
-                with workspace_tabs[1]:
+                elif workspace_view == "Review":
+                    _render_match_bookmark_review(
+                        context_key="studio_review",
+                        api_base=api_base,
+                        tenant_id=tenant_id,
+                        token=token,
+                        selected_match=selected_match,
+                        selected_match_id=selected_match_id,
+                        jobs=jobs,
+                        is_technical=is_technical,
+                        mode_code="technical" if is_technical else "user",
+                        view_code="studio",
+                    )
+
+                elif workspace_view == "Live":
                     if not jobs:
                         st.info("No runs yet for this match.")
                     else:
@@ -2065,16 +2477,34 @@ if nav_key == "Portal Home":
                             for job in jobs
                         }
                         option_labels = list(job_options.keys())
-                        default_job_idx = 0
-                        for idx, label in enumerate(option_labels):
-                            if str(job_options[label].get("job_id")) == default_job_id:
-                                default_job_idx = idx
-                                break
+                        pending_live_job_id = _extract_entity_id_from_ref(
+                            str(st.session_state.get("portal_pending_job_select_id", "") or ""),
+                            "job",
+                        )
+                        selected_live_job_id = _extract_entity_id_from_ref(
+                            str(st.session_state.get("selected_job_id", "") or ""),
+                            "job",
+                        )
+                        preferred_job_id = pending_live_job_id or selected_live_job_id
+                        if preferred_job_id and not any(
+                            str(job.get("job_id")) == preferred_job_id for job in jobs
+                        ):
+                            preferred_job_id = ""
+                        default_job_id = preferred_job_id or default_job_id
+                        desired_live_label, default_job_idx = _option_label_for_entity_id(job_options, default_job_id)
+                        live_job_key = f"studio_live_job_{selected_match_id}"
+                        current_live_label = str(st.session_state.get(live_job_key, "") or "")
+                        if desired_live_label and (pending_live_job_id or current_live_label not in option_labels):
+                            st.session_state[live_job_key] = desired_live_label
+                            if pending_live_job_id:
+                                st.session_state.portal_pending_job_select_id = ""
+                        elif current_live_label and current_live_label not in option_labels and option_labels:
+                            st.session_state[live_job_key] = option_labels[default_job_idx]
                         selected_job_label = st.selectbox(
                             "Run",
                             option_labels,
                             index=default_job_idx,
-                            key=f"studio_live_job_{selected_match_id}",
+                            key=live_job_key,
                         )
                         selected_job = job_options[selected_job_label]
                         selected_job_id = str(selected_job.get("job_id"))
@@ -2085,9 +2515,11 @@ if nav_key == "Portal Home":
                             unsafe_allow_html=True,
                         )
                         st.progress(float(selected_job.get("progress", 0.0)))
+                        _render_job_outcome_notice(selected_job)
                         st.caption(
                             f"Model `{selected_job.get('config', {}).get('model_version', '-')}` | "
                             f"Camera `{selected_job.get('config', {}).get('camera_mode', 'wide')}` | "
+                            f"Window `{_format_trim_window(selected_job.get('config', {}) or {})}` | "
                             f"Targets `{_focus_targets_from_config(selected_job.get('config', {}))}`"
                         )
 
@@ -2112,7 +2544,7 @@ if nav_key == "Portal Home":
                             time.sleep(1.5)
                             safe_rerun()
 
-                with workspace_tabs[2]:
+                elif workspace_view == "Runs":
                     if not jobs:
                         st.info("No runs available yet.")
                     else:
@@ -2125,9 +2557,11 @@ if nav_key == "Portal Home":
                                     "stage": job.get("stage"),
                                     "model": (job.get("config", {}) or {}).get("model_version", "-"),
                                     "camera": (job.get("config", {}) or {}).get("camera_mode", "wide"),
+                                    "window": _format_trim_window(job.get("config", {}) or {}),
                                     "targets": _focus_targets_from_config(job.get("config", {}) or {}),
                                     "analysis_only": bool((job.get("config", {}) or {}).get("analysis_only", False)),
                                     "bookmarks": int((job.get("result", {}) or {}).get("bookmarks_count", 0) or 0),
+                                    "error": job.get("error_message") or "",
                                     "updated_at": _iso_to_short(job.get("updated_at")),
                                 }
                             )
@@ -2169,7 +2603,7 @@ if nav_key == "Portal Home":
                             )
                             safe_rerun()
 
-                with workspace_tabs[3]:
+                elif workspace_view == "Exports":
                     metadata = selected_match.get("metadata", {}) if isinstance(selected_match.get("metadata"), dict) else {}
                     highlight_exports = list(metadata.get("highlight_exports", []) or [])
                     generated_clips = list(metadata.get("generated_clips", []) or [])
@@ -2225,7 +2659,7 @@ if nav_key == "Portal Home":
                     else:
                         st.caption("No highlight exports yet for this match.")
 
-                with workspace_tabs[4]:
+                elif workspace_view == "Assistant":
                     _render_match_assistant(
                         api_base=api_base,
                         tenant_id=tenant_id,
@@ -2245,77 +2679,204 @@ elif nav_key == "New Processing Run":
     model_versions = list(dict.fromkeys(model_versions))
 
     if mode == "Upload New Game":
-        left, right = st.columns([1.2, 1.8])
+        left, right = st.columns([1.0, 2.1])
         with left:
+            st.markdown("#### Game")
             match_name = st.text_input("Game Name", value="U13 Matchday", key="portal_new_match_name")
             home_team = st.text_input("Home Team", value="Home", key="portal_new_home_team")
             away_team = st.text_input("Away Team", value="Away", key="portal_new_away_team")
             match_date = st.text_input("Match Date", value=datetime.utcnow().strftime("%Y-%m-%d"), key="portal_new_match_date")
-            profile_name = st.selectbox(
-                "Processing Profile",
-                ["Balanced", "Offense Focus", "Set Piece Focus", "Discipline Review", "Custom"],
-                key="portal_new_profile_name",
-            )
-            model_version = st.selectbox("Model Version", model_versions, index=0, key="portal_new_model_version")
+            if bool(st.session_state.get("portal_gpu_ready", False)):
+                st.success("GPU ready")
+            else:
+                st.warning("GPU not ready")
 
         with right:
-            upload = st.file_uploader(
-                "Upload Game Video",
-                type=["mp4", "mov", "mkv", "avi", "m4v"],
-                key="portal_new_upload",
-            )
-            selected_targets = st.multiselect(
-                "Event Targets",
-                EVENT_TARGET_OPTIONS,
-                default=[],
-                key="portal_new_targets",
-                help="Leave empty for broad highlight generation.",
-            )
-            custom_targets = st.text_input(
-                "Additional Custom Targets (comma separated)",
-                value="",
-                key="portal_new_custom_targets",
-            )
+            upload = None
+            local_video_path = ""
+            local_video_probe: Dict[str, Any] = {"ok": False, "message": "Choose a local video file path."}
+            ingest_mode = "Local File Path (10GB+)"
+            profile_name = "Balanced"
+            model_version = model_versions[0] if model_versions else "event-v0"
+            selected_targets: List[str] = []
+            custom_targets = ""
+            pre_seconds = 2.0
+            post_seconds = 6.0
+            min_clip = 4.0
+            speed_sens = 2.0
+            audio_sens = 2.0
+            thread_count = 0
+            camera_mode = "wide"
+            zoom_factor = 1.6
+            no_audio = False
+            overlay = False
+            require_gpu = bool(st.session_state.get("portal_gpu_ready", False))
+            analysis_only = True
+            log_profile = "detailed"
+            player_roi_payload: Dict[str, Any] = {"enabled": False, "roi": None}
 
-            cfg_col1, cfg_col2, cfg_col3 = st.columns(3)
-            pre_seconds = cfg_col1.slider("Pre Buffer", 0.5, 10.0, 2.0, 0.5, key="portal_new_pre")
-            post_seconds = cfg_col2.slider("Post Buffer", 1.0, 20.0, 6.0, 0.5, key="portal_new_post")
-            min_clip = cfg_col3.slider("Min Clip", 1.0, 15.0, 4.0, 0.5, key="portal_new_min_clip")
+            source_tab, analysis_tab, output_tab, advanced_tab = st.tabs(["Source", "Analysis", "Output", "Advanced"])
 
-            cfg_col4, cfg_col5, cfg_col6 = st.columns(3)
-            speed_sens = cfg_col4.slider("Speed Sensitivity", 1.0, 4.0, 2.0, 0.1, key="portal_new_speed_sens")
-            audio_sens = cfg_col5.slider("Audio Sensitivity", 1.0, 4.0, 2.0, 0.1, key="portal_new_audio_sens")
-            thread_count = cfg_col6.number_input("Threads (0=auto)", min_value=0, max_value=32, value=0, key="portal_new_threads")
+            with source_tab:
+                ingest_mode = st.radio(
+                    "Video Source",
+                    ["Local File Path (10GB+)", "Browser Upload"],
+                    index=0,
+                    horizontal=True,
+                    key="portal_new_ingest_mode",
+                    help="Use local file path for large videos already on this machine. Browser upload is only practical for smaller files.",
+                )
+                if ingest_mode == "Local File Path (10GB+)":
+                    path_col, browse_col = st.columns([5, 1])
+                    with browse_col:
+                        st.caption("")
+                        if st.button(
+                            "Browse",
+                            key="portal_new_local_video_browse",
+                            help="Open a native file picker on this machine and register the selected file path without uploading it.",
+                            use_container_width=True,
+                        ):
+                            picked = _choose_local_video_file(str(st.session_state.get("portal_new_local_video_path", "")))
+                            if picked.get("path"):
+                                st.session_state.portal_new_local_video_path = picked["path"]
+                                st.session_state.portal_new_local_video_pick_error = ""
+                                safe_rerun()
+                            else:
+                                st.session_state.portal_new_local_video_pick_error = picked.get("error") or "No file selected."
+                    with path_col:
+                        local_video_path = st.text_input(
+                            "Local Video Path",
+                            value=str(st.session_state.get("portal_new_local_video_path", "")),
+                            placeholder=r"C:\Videos\full-match.mp4",
+                            key="portal_new_local_video_path",
+                            help="The API/worker must be able to read this path. This avoids copying huge video files through the browser.",
+                        )
+                    picker_error = str(st.session_state.get("portal_new_local_video_pick_error", "") or "").strip()
+                    if picker_error:
+                        st.caption(picker_error)
+                    if local_video_path.strip():
+                        local_video_probe = inspect_local_video(api_base, tenant_id, token, local_video_path)
+                    else:
+                        local_video_probe = _local_video_probe(local_video_path)
+                    if local_video_probe.get("ok"):
+                        media_summary = _format_media_probe_summary(local_video_probe)
+                        suffix = f" | {media_summary}" if media_summary else ""
+                        st.success(
+                            f"Local source ready: {_format_file_size(local_video_probe.get('size_bytes'))}{suffix}"
+                        )
+                        st.caption(f"Worker path: `{local_video_probe.get('path')}`")
+                    elif local_video_path.strip():
+                        status_message = str(local_video_probe.get("message") or "Local source is not ready.")
+                        if local_video_probe.get("code") == "zero_bytes":
+                            st.info(status_message)
+                        else:
+                            st.warning(status_message)
+                        st.caption(f"Selected path: `{local_video_probe.get('path') or local_video_path}`")
+                else:
+                    st.warning("Browser upload can be unreliable for very large video. Prefer Local File Path for 10GB recordings.")
+                    upload = st.file_uploader(
+                        "Upload Game Video",
+                        type=["mp4", "mov", "mkv", "avi", "m4v"],
+                        key="portal_new_upload",
+                    )
+                    if upload is not None:
+                        st.caption(f"Selected upload: `{upload.name}` | {_format_file_size(getattr(upload, 'size', 0))}")
 
-            cam_col1, cam_col2, cam_col3 = st.columns(3)
-            camera_mode = cam_col1.selectbox(
-                "Camera Mode",
-                ["wide", "follow_action", "follow_player"],
-                index=0,
-                key="portal_new_camera_mode",
-                help="`follow_action` keeps the tracked player central while nudging toward nearby ball action.",
-            )
-            zoom_factor = cam_col2.slider("Zoom Factor", 1.0, 2.5, 1.6, 0.1, key="portal_new_zoom_factor")
-            cam_col3.caption("Use `wide` for the original frame. Follow-cam modes are best for player-centric exports.")
+                trim_window = _render_trim_window_controls(
+                    context_key="portal_new",
+                    default_enabled=True,
+                    default_duration_minutes=2.0,
+                )
 
-            opt_col1, opt_col2, opt_col3, opt_col4 = st.columns(4)
-            no_audio = opt_col1.checkbox("Disable Audio Detection", value=False, key="portal_new_no_audio")
-            overlay = opt_col2.checkbox("Generate Spotlight Overlay", value=False, key="portal_new_overlay")
-            require_gpu = opt_col3.checkbox("Require GPU", value=False, key="portal_new_require_gpu")
-            analysis_only = opt_col4.checkbox(
-                "Analysis Only (No Clips)",
-                value=False,
-                key="portal_new_analysis_only",
-                help="Generate bookmark table/events quickly without writing highlight video clips.",
-            )
+            with analysis_tab:
+                a_col1, a_col2, a_col3 = st.columns([1.1, 1.0, 1.0])
+                profile_name = a_col1.selectbox(
+                    "Processing Profile",
+                    ["Balanced", "Offense Focus", "Set Piece Focus", "Discipline Review", "Custom"],
+                    key="portal_new_profile_name",
+                )
+                model_version = a_col2.selectbox("Model Version", model_versions, index=0, key="portal_new_model_version")
+                analysis_only = a_col3.checkbox(
+                    "Analysis Only",
+                    value=True,
+                    key="portal_new_analysis_only",
+                    help="Generate bookmark table/events quickly without writing highlight video clips.",
+                )
+                selected_targets = st.multiselect(
+                    "Event Targets",
+                    EVENT_TARGET_OPTIONS,
+                    default=[],
+                    key="portal_new_targets",
+                    help="Leave empty for broad highlight generation.",
+                )
+                custom_targets = st.text_input(
+                    "Additional Custom Targets",
+                    value="",
+                    key="portal_new_custom_targets",
+                )
 
-            player_roi_payload = _render_player_roi_selector(
-                context_key="portal_new",
-                default_enabled=False,
-                existing_roi=None,
-                upload_bytes=(upload.getvalue() if upload is not None else None),
-                upload_name=(upload.name if upload is not None else ""),
-            )
+            with output_tab:
+                out_col1, out_col2, out_col3 = st.columns(3)
+                camera_mode = out_col1.selectbox(
+                    "Camera Mode",
+                    ["wide", "follow_action", "follow_player"],
+                    index=0,
+                    key="portal_new_camera_mode",
+                    help="`follow_action` keeps the tracked player central while nudging toward nearby ball action.",
+                )
+                zoom_factor = out_col2.slider("Zoom Factor", 1.0, 2.5, 1.6, 0.1, key="portal_new_zoom_factor")
+                require_gpu = out_col3.checkbox(
+                    "Require GPU",
+                    value=bool(st.session_state.get("portal_gpu_ready", False)),
+                    key="portal_new_require_gpu",
+                    help="When enabled, the run fails early unless PyTorch CUDA is available.",
+                )
+                output_col1, output_col2 = st.columns(2)
+                no_audio = output_col1.checkbox("Disable Audio Detection", value=False, key="portal_new_no_audio")
+                overlay = output_col2.checkbox("Generate Spotlight Overlay", value=False, key="portal_new_overlay")
+
+            with advanced_tab:
+                with st.expander("Logging", expanded=True):
+                    selected_log_profile = st.selectbox(
+                        "Logging Profile",
+                        LOG_PROFILE_OPTIONS,
+                        index=1,
+                        key="portal_new_log_profile",
+                        help="Standard keeps core status. Detailed adds process notes. Diagnostic captures raw config and deeper technical checkpoints.",
+                    )
+                    log_profile = selected_log_profile.lower()
+                    st.caption("Use Detailed while testing. Switch to Standard when routine runs are stable.")
+
+                with st.expander("Timing and Detection", expanded=(profile_name == "Custom")):
+                    cfg_col1, cfg_col2, cfg_col3 = st.columns(3)
+                    pre_seconds = cfg_col1.slider("Pre Buffer", 0.5, 10.0, 2.0, 0.5, key="portal_new_pre")
+                    post_seconds = cfg_col2.slider("Post Buffer", 1.0, 20.0, 6.0, 0.5, key="portal_new_post")
+                    min_clip = cfg_col3.slider("Min Clip", 1.0, 15.0, 4.0, 0.5, key="portal_new_min_clip")
+
+                    cfg_col4, cfg_col5, cfg_col6 = st.columns(3)
+                    speed_sens = cfg_col4.slider("Speed Sensitivity", 1.0, 4.0, 2.0, 0.1, key="portal_new_speed_sens")
+                    audio_sens = cfg_col5.slider("Audio Sensitivity", 1.0, 4.0, 2.0, 0.1, key="portal_new_audio_sens")
+                    thread_count = cfg_col6.number_input("Threads (0=auto)", min_value=0, max_value=32, value=0, key="portal_new_threads")
+
+                with st.expander("Player Lock", expanded=False):
+                    player_roi_payload = _render_player_roi_selector(
+                        context_key="portal_new",
+                        default_enabled=False,
+                        existing_roi=None,
+                        source_video_path=(str(local_video_probe.get("path") or "") if local_video_probe.get("ok") else ""),
+                        upload_file=(upload if ingest_mode == "Browser Upload" and upload is not None else None),
+                        upload_name=(upload.name if upload is not None else ""),
+                    )
+
+            source_status = "Ready" if (
+                (ingest_mode == "Local File Path (10GB+)" and local_video_probe.get("ok"))
+                or (ingest_mode == "Browser Upload" and upload is not None)
+            ) else "Needed"
+            summary_col1, summary_col2, summary_col3, summary_col4 = st.columns(4)
+            summary_col1.metric("Source", source_status)
+            summary_col2.metric("Window", trim_window["label"])
+            summary_col3.metric("Mode", "Analysis" if analysis_only else "Clips")
+            summary_col4.metric("GPU", "Required" if require_gpu else "Optional")
 
         cooldown_until = float(st.session_state.portal_launch_cooldown_until or 0.0)
         launch_locked = time.time() < cooldown_until
@@ -2331,8 +2892,14 @@ elif nav_key == "New Processing Run":
             disabled=launch_locked,
         ):
             st.session_state.portal_launch_cooldown_until = time.time() + 8.0
-            if upload is None:
+            if ingest_mode == "Local File Path (10GB+)" and not local_video_probe.get("ok"):
+                st.error(str(local_video_probe.get("message") or "Choose a readable non-empty local video file."))
+                st.session_state.portal_launch_cooldown_until = 0.0
+            elif ingest_mode == "Browser Upload" and upload is None:
                 st.error("Upload a game video first.")
+                st.session_state.portal_launch_cooldown_until = 0.0
+            elif ingest_mode == "Browser Upload" and int(getattr(upload, "size", 0) or 0) <= 0:
+                st.error("The selected video file is empty. Choose a real MP4/MOV/MKV/AVI file and try again.")
                 st.session_state.portal_launch_cooldown_until = 0.0
             elif player_roi_payload.get("enabled") and not player_roi_payload.get("roi"):
                 st.error("Player ROI lock is enabled, but the first-frame selector is not ready. Uncheck it or choose a readable video.")
@@ -2363,6 +2930,8 @@ elif nav_key == "New Processing Run":
                         "requested_targets": target_list,
                         "model_version_hint": model_version,
                         "created_from": "portal_new_game",
+                        "ingest_mode": ingest_mode,
+                        "processing_window": trim_window["label"],
                     },
                 }
                 match_result = api_request("POST", api_base, "/matches", tenant_id, token, json_body=match_payload)
@@ -2371,24 +2940,35 @@ elif nav_key == "New Processing Run":
                     st.session_state.portal_launch_cooldown_until = 0.0
                 else:
                     match_id = match_result["payload"]["match_id"]
-                    files = {
-                        "file": (
-                            upload.name,
-                            upload.getvalue(),
-                            upload.type or "application/octet-stream",
+                    if ingest_mode == "Local File Path (10GB+)":
+                        ingest_result = api_request(
+                            "POST",
+                            api_base,
+                            f"/matches/{match_id}/assets/register-local",
+                            tenant_id,
+                            token,
+                            json_body={"path": str(local_video_probe.get("path") or ""), "set_as_source": True},
+                            timeout=60,
                         )
-                    }
-                    upload_result = api_request(
-                        "POST",
-                        api_base,
-                        f"/matches/{match_id}/assets/upload",
-                        tenant_id,
-                        token,
-                        files=files,
-                        timeout=900,
-                    )
-                    if not upload_result["ok"]:
-                        st.error(f"Match created, but upload failed: {upload_result['payload']}")
+                    else:
+                        files = {
+                            "file": (
+                                upload.name,
+                                upload.getvalue(),
+                                upload.type or "application/octet-stream",
+                            )
+                        }
+                        ingest_result = api_request(
+                            "POST",
+                            api_base,
+                            f"/matches/{match_id}/assets/upload",
+                            tenant_id,
+                            token,
+                            files=files,
+                            timeout=900,
+                        )
+                    if not ingest_result["ok"]:
+                        st.error(f"Match created, but video ingest failed: {ingest_result['payload']}")
                         st.session_state.portal_launch_cooldown_until = 0.0
                     else:
                         job_config: Dict[str, Any] = {
@@ -2408,7 +2988,13 @@ elif nav_key == "New Processing Run":
                             "analysis_only": bool(analysis_only),
                             "run_created_at": datetime.utcnow().isoformat(),
                             "run_created_from": "portal_ui",
+                            "ingest_mode": ingest_mode,
+                            "test_window_enabled": bool(trim_window["enabled"]),
+                            "log_profile": log_profile,
                         }
+                        if trim_window["enabled"]:
+                            job_config["trim_start"] = float(trim_window["trim_start"])
+                            job_config["trim_end"] = float(trim_window["trim_end"])
                         if player_roi_payload.get("roi"):
                             job_config["player_roi"] = dict(player_roi_payload["roi"])
                         if int(thread_count) > 0:
@@ -2430,6 +3016,8 @@ elif nav_key == "New Processing Run":
                             st.session_state.selected_match_id = match_id
                             st.session_state.selected_match_label = str(match_name or match_id)
                             st.session_state.selected_job_id = job_id
+                            st.session_state.portal_pending_match_select_id = match_id
+                            st.session_state.portal_pending_job_select_id = job_id
                             st.session_state.portal_auto_fetch_job_id = job_id
                             st.session_state.portal_pending_nav = monitor_nav_label
                             st.session_state.portal_flash_message = (
@@ -2485,6 +3073,16 @@ elif nav_key == "New Processing Run":
                     key="portal_rerun_analysis_only",
                 )
                 source_config = dict(source_job.get("config", {}) or {})
+                source_log_profile = str(source_config.get("log_profile") or "detailed").strip().lower()
+                if source_log_profile not in {"standard", "detailed", "diagnostic"}:
+                    source_log_profile = "detailed"
+                rerun_log_profile = st.selectbox(
+                    "Logging Profile",
+                    LOG_PROFILE_OPTIONS,
+                    index=LOG_PROFILE_OPTIONS.index(source_log_profile.title()),
+                    key="portal_rerun_log_profile",
+                    help="Detailed logs are useful while validating reruns. Diagnostic captures deeper raw config checkpoints.",
+                ).lower()
                 rerun_camera_options = ["wide", "follow_action", "follow_player"]
                 source_camera_mode = str(source_config.get("camera_mode") or "wide")
                 if source_camera_mode not in rerun_camera_options:
@@ -2503,6 +3101,12 @@ elif nav_key == "New Processing Run":
                     float(source_config.get("zoom_factor", 1.6)),
                     0.1,
                     key="portal_rerun_zoom_factor",
+                )
+                rerun_trim_window = _render_trim_window_controls(
+                    context_key=f"portal_rerun_{source_job['job_id']}",
+                    config=source_config,
+                    default_enabled=False,
+                    default_duration_minutes=2.0,
                 )
 
                 rerun_cooldown_until = float(st.session_state.portal_launch_cooldown_until or 0.0)
@@ -2525,6 +3129,14 @@ elif nav_key == "New Processing Run":
                     overrides["analysis_only"] = bool(rerun_analysis_only)
                     overrides["camera_mode"] = str(rerun_camera_mode)
                     overrides["zoom_factor"] = float(rerun_zoom_factor)
+                    overrides["log_profile"] = rerun_log_profile
+                    overrides["test_window_enabled"] = bool(rerun_trim_window["enabled"])
+                    overrides["trim_start"] = (
+                        float(rerun_trim_window["trim_start"]) if rerun_trim_window["enabled"] else None
+                    )
+                    overrides["trim_end"] = (
+                        float(rerun_trim_window["trim_end"]) if rerun_trim_window["enabled"] else None
+                    )
 
                     rerun_result = api_request(
                         "POST",
@@ -2542,6 +3154,8 @@ elif nav_key == "New Processing Run":
                         st.session_state.selected_match_id = match_id
                         st.session_state.selected_match_label = str(selected_match_obj.get("name") or match_id)
                         st.session_state.selected_job_id = rerun_job_id
+                        st.session_state.portal_pending_match_select_id = match_id
+                        st.session_state.portal_pending_job_select_id = rerun_job_id
                         st.session_state.portal_auto_fetch_job_id = rerun_job_id
                         st.session_state.portal_pending_nav = monitor_nav_label
                         st.session_state.portal_flash_message = f"Rerun queued: {rerun_job_id}"
@@ -2577,6 +3191,7 @@ elif nav_key == "Game Library":
                     "latest_stage": latest.get("stage") if latest else "-",
                     "model_version": (latest or {}).get("config", {}).get("model_version", "-"),
                     "camera": (latest or {}).get("config", {}).get("camera_mode", "wide"),
+                    "window": _format_trim_window((latest or {}).get("config", {}) or {}),
                     "targets": _focus_targets_from_config((latest or {}).get("config", {})),
                     "analysis_only": bool((latest or {}).get("config", {}).get("analysis_only", False)),
                     "bookmarks": int((latest or {}).get("result", {}).get("bookmarks_count", 0) or 0),
@@ -2614,18 +3229,24 @@ elif nav_key == "Game Library":
         table_rows = [{key: value for key, value in row.items() if key != "latest_update_raw"} for row in filtered_rows or rows]
         st.dataframe(table_rows, use_container_width=True, hide_index=True)
 
-        selector = {
-            f"{row['game']} | {row['date']} | {row['latest_status']}": row["match_id"]
-            for row in (filtered_rows or rows)
-        }
+        selector = {_library_match_selector_label(row): row["match_id"] for row in (filtered_rows or rows)}
         selector_labels = list(selector.keys())
-        default_match = str(st.session_state.selected_match_id or "").strip()
-        selected_index = 0
-        if default_match:
-            for idx, label in enumerate(selector_labels):
-                if selector[label] == default_match:
-                    selected_index = idx
-                    break
+        default_match = _extract_entity_id_from_ref(str(st.session_state.selected_match_id or ""), "match")
+        pending_library_match = _extract_entity_id_from_ref(
+            str(st.session_state.get("portal_pending_match_select_id", "") or ""),
+            "match",
+        )
+        desired_library_label, selected_index = _option_label_for_entity_id(
+            selector,
+            pending_library_match or default_match,
+        )
+        current_library_label = str(st.session_state.get("portal_library_select", "") or "")
+        if desired_library_label and (pending_library_match or current_library_label not in selector_labels):
+            st.session_state.portal_library_select = desired_library_label
+            if pending_library_match:
+                st.session_state.portal_pending_match_select_id = ""
+        elif current_library_label and current_library_label not in selector_labels and selector_labels:
+            st.session_state.portal_library_select = selector_labels[selected_index]
         selected_label = st.selectbox("Game Details", selector_labels, index=selected_index, key="portal_library_select")
         selected_match_id = selector[selected_label]
         st.session_state.selected_match_id = selected_match_id
@@ -2795,6 +3416,7 @@ elif nav_key == "Game Library":
                         summary_targets = _focus_targets_from_config(latest_config)
                         st.write(f"Model: `{latest_config.get('model_version', '-')}`")
                         st.write(f"Camera: `{latest_config.get('camera_mode', 'wide')}`")
+                        st.write(f"Window: `{_format_trim_window(latest_config)}`")
                         st.write(f"Targets: `{summary_targets}`")
                         st.write(f"Analysis-only: `{bool(latest_config.get('analysis_only', False))}`")
                     if st.button("Reprocess This Match (Latest Config)", key=f"portal_match_reprocess_latest_{selected_match_id}"):
@@ -2828,134 +3450,189 @@ elif nav_key == "Game Library":
                 if custom_profile_default not in {"Balanced", "Offense Focus", "Set Piece Focus", "Discipline Review", "Custom"}:
                     custom_profile_default = "Custom"
 
-                custom_col1, custom_col2, custom_col3 = st.columns(3)
-                profile_name = custom_col1.selectbox(
-                    "Profile",
-                    ["Balanced", "Offense Focus", "Set Piece Focus", "Discipline Review", "Custom"],
-                    index=["Balanced", "Offense Focus", "Set Piece Focus", "Discipline Review", "Custom"].index(custom_profile_default),
-                    key=f"portal_match_custom_profile_{selected_match_id}",
-                )
-                model_version = custom_col2.selectbox(
-                    "Model Version",
-                    model_versions if model_versions else ["event-v0"],
-                    index=(model_versions.index(custom_model_default) if custom_model_default in model_versions else 0),
-                    key=f"portal_match_custom_model_{selected_match_id}",
-                )
-                analysis_only = custom_col3.checkbox(
-                    "Analysis Only",
-                    value=bool(latest_config.get("analysis_only", False)),
-                    key=f"portal_match_custom_analysis_only_{selected_match_id}",
-                )
-
-                targets = st.multiselect(
-                    "Event Targets",
-                    EVENT_TARGET_OPTIONS,
-                    default=[t for t in custom_targets_default if t in EVENT_TARGET_OPTIONS],
-                    key=f"portal_match_custom_targets_{selected_match_id}",
-                )
-                custom_targets = st.text_input(
-                    "Additional Custom Targets (comma separated)",
-                    value="",
-                    key=f"portal_match_custom_targets_extra_{selected_match_id}",
-                )
-
-                tune_col1, tune_col2, tune_col3 = st.columns(3)
-                pre_seconds = tune_col1.slider(
-                    "Pre Buffer",
-                    0.5,
-                    10.0,
-                    float(latest_config.get("pre_seconds", 2.0)),
-                    0.5,
-                    key=f"portal_match_custom_pre_{selected_match_id}",
-                )
-                post_seconds = tune_col2.slider(
-                    "Post Buffer",
-                    1.0,
-                    20.0,
-                    float(latest_config.get("post_seconds", 6.0)),
-                    0.5,
-                    key=f"portal_match_custom_post_{selected_match_id}",
-                )
-                min_clip = tune_col3.slider(
-                    "Min Clip",
-                    1.0,
-                    15.0,
-                    float(latest_config.get("min_clip_duration", 4.0)),
-                    0.5,
-                    key=f"portal_match_custom_min_clip_{selected_match_id}",
-                )
-
-                tune_col4, tune_col5, tune_col6 = st.columns(3)
-                speed_sens = tune_col4.slider(
-                    "Speed Sensitivity",
-                    1.0,
-                    4.0,
-                    float(latest_config.get("speed_sensitivity", 2.0)),
-                    0.1,
-                    key=f"portal_match_custom_speed_{selected_match_id}",
-                )
-                audio_sens = tune_col5.slider(
-                    "Audio Sensitivity",
-                    1.0,
-                    4.0,
-                    float(latest_config.get("audio_sensitivity", 2.0)),
-                    0.1,
-                    key=f"portal_match_custom_audio_{selected_match_id}",
-                )
-                threads = int(
-                    tune_col6.number_input(
-                        "Threads (0=auto)",
-                        min_value=0,
-                        max_value=32,
-                        value=int(latest_config.get("threads", 0) or 0),
-                        key=f"portal_match_custom_threads_{selected_match_id}",
-                    )
-                )
-
-                cam_col1, cam_col2, cam_col3 = st.columns(3)
+                profile_name = custom_profile_default
+                model_version = custom_model_default if custom_model_default in model_versions else (model_versions[0] if model_versions else "event-v0")
+                analysis_only = bool(latest_config.get("analysis_only", False))
+                targets: List[str] = [t for t in custom_targets_default if t in EVENT_TARGET_OPTIONS]
+                custom_targets = ""
+                pre_seconds = float(latest_config.get("pre_seconds", 2.0))
+                post_seconds = float(latest_config.get("post_seconds", 6.0))
+                min_clip = float(latest_config.get("min_clip_duration", 4.0))
+                speed_sens = float(latest_config.get("speed_sensitivity", 2.0))
+                audio_sens = float(latest_config.get("audio_sensitivity", 2.0))
+                threads = int(latest_config.get("threads", 0) or 0)
+                trim_window = {
+                    "enabled": False,
+                    "trim_start": None,
+                    "trim_end": None,
+                    "label": _format_trim_window(latest_config),
+                }
                 camera_mode_options = ["wide", "follow_action", "follow_player"]
                 current_camera_mode = str(latest_config.get("camera_mode") or "wide")
                 if current_camera_mode not in camera_mode_options:
                     current_camera_mode = "wide"
-                camera_mode = cam_col1.selectbox(
-                    "Camera Mode",
-                    camera_mode_options,
-                    index=camera_mode_options.index(current_camera_mode),
-                    key=f"portal_match_custom_camera_mode_{selected_match_id}",
-                )
-                zoom_factor = cam_col2.slider(
-                    "Zoom Factor",
-                    1.0,
-                    2.5,
-                    float(latest_config.get("zoom_factor", 1.6)),
-                    0.1,
-                    key=f"portal_match_custom_zoom_factor_{selected_match_id}",
-                )
-                cam_col3.caption("Follow-cam crops around the tracked player and recenters nearby ball action.")
+                camera_mode = current_camera_mode
+                zoom_factor = float(latest_config.get("zoom_factor", 1.6))
+                no_audio = bool(latest_config.get("no_audio", False))
+                overlay = bool(latest_config.get("overlay", False))
+                require_gpu = bool(latest_config.get("require_gpu", False))
+                current_log_profile = str(latest_config.get("log_profile") or "detailed").strip().lower()
+                if current_log_profile not in {"standard", "detailed", "diagnostic"}:
+                    current_log_profile = "detailed"
+                log_profile = current_log_profile
+                player_roi_payload: Dict[str, Any] = {"enabled": bool(latest_config.get("player_roi")), "roi": latest_config.get("player_roi")}
 
-                opt_col1, opt_col2, opt_col3 = st.columns(3)
-                no_audio = opt_col1.checkbox(
-                    "Disable Audio Detection",
-                    value=bool(latest_config.get("no_audio", False)),
-                    key=f"portal_match_custom_no_audio_{selected_match_id}",
-                )
-                overlay = opt_col2.checkbox(
-                    "Generate Overlay",
-                    value=bool(latest_config.get("overlay", False)),
-                    key=f"portal_match_custom_overlay_{selected_match_id}",
-                )
-                require_gpu = opt_col3.checkbox(
-                    "Require GPU",
-                    value=bool(latest_config.get("require_gpu", False)),
-                    key=f"portal_match_custom_require_gpu_{selected_match_id}",
-                )
+                custom_analysis_tab, custom_output_tab, custom_advanced_tab = st.tabs(["Analysis", "Output", "Advanced"])
 
-                player_roi_payload = _render_player_roi_selector(
-                    context_key=f"portal_match_custom_{selected_match_id}",
-                    default_enabled=bool(latest_config.get("player_roi")),
-                    existing_roi=(latest_config.get("player_roi") if isinstance(latest_config.get("player_roi"), dict) else None),
-                    source_video_path=source_video or "",
-                )
+                with custom_analysis_tab:
+                    custom_col1, custom_col2, custom_col3 = st.columns(3)
+                    profile_name = custom_col1.selectbox(
+                        "Profile",
+                        ["Balanced", "Offense Focus", "Set Piece Focus", "Discipline Review", "Custom"],
+                        index=["Balanced", "Offense Focus", "Set Piece Focus", "Discipline Review", "Custom"].index(custom_profile_default),
+                        key=f"portal_match_custom_profile_{selected_match_id}",
+                    )
+                    model_version = custom_col2.selectbox(
+                        "Model Version",
+                        model_versions if model_versions else ["event-v0"],
+                        index=(model_versions.index(custom_model_default) if custom_model_default in model_versions else 0),
+                        key=f"portal_match_custom_model_{selected_match_id}",
+                    )
+                    analysis_only = custom_col3.checkbox(
+                        "Analysis Only",
+                        value=bool(latest_config.get("analysis_only", False)),
+                        key=f"portal_match_custom_analysis_only_{selected_match_id}",
+                    )
+
+                    targets = st.multiselect(
+                        "Event Targets",
+                        EVENT_TARGET_OPTIONS,
+                        default=[t for t in custom_targets_default if t in EVENT_TARGET_OPTIONS],
+                        key=f"portal_match_custom_targets_{selected_match_id}",
+                    )
+                    custom_targets = st.text_input(
+                        "Additional Custom Targets",
+                        value="",
+                        key=f"portal_match_custom_targets_extra_{selected_match_id}",
+                    )
+                    trim_window = _render_trim_window_controls(
+                        context_key=f"portal_match_custom_{selected_match_id}",
+                        config=latest_config,
+                        default_enabled=False,
+                        default_duration_minutes=2.0,
+                    )
+
+                with custom_output_tab:
+                    cam_col1, cam_col2, opt_col1, opt_col2, opt_col3 = st.columns(5)
+                    camera_mode = cam_col1.selectbox(
+                        "Camera Mode",
+                        camera_mode_options,
+                        index=camera_mode_options.index(current_camera_mode),
+                        key=f"portal_match_custom_camera_mode_{selected_match_id}",
+                    )
+                    zoom_factor = cam_col2.slider(
+                        "Zoom Factor",
+                        1.0,
+                        2.5,
+                        float(latest_config.get("zoom_factor", 1.6)),
+                        0.1,
+                        key=f"portal_match_custom_zoom_factor_{selected_match_id}",
+                    )
+                    no_audio = opt_col1.checkbox(
+                        "Disable Audio Detection",
+                        value=bool(latest_config.get("no_audio", False)),
+                        key=f"portal_match_custom_no_audio_{selected_match_id}",
+                    )
+                    overlay = opt_col2.checkbox(
+                        "Generate Overlay",
+                        value=bool(latest_config.get("overlay", False)),
+                        key=f"portal_match_custom_overlay_{selected_match_id}",
+                    )
+                    require_gpu = opt_col3.checkbox(
+                        "Require GPU",
+                        value=bool(latest_config.get("require_gpu", False)),
+                        key=f"portal_match_custom_require_gpu_{selected_match_id}",
+                    )
+
+                with custom_advanced_tab:
+                    with st.expander("Logging", expanded=True):
+                        selected_log_profile = st.selectbox(
+                            "Logging Profile",
+                            LOG_PROFILE_OPTIONS,
+                            index=LOG_PROFILE_OPTIONS.index(current_log_profile.title()),
+                            key=f"portal_match_custom_log_profile_{selected_match_id}",
+                            help="Standard keeps core status. Detailed adds process notes. Diagnostic captures raw config and deeper technical checkpoints.",
+                        )
+                        log_profile = selected_log_profile.lower()
+                        st.caption("Use Detailed or Diagnostic for short test windows; use Standard for routine full-match runs.")
+
+                    with st.expander("Timing and Detection", expanded=(profile_name == "Custom")):
+                        tune_col1, tune_col2, tune_col3 = st.columns(3)
+                        pre_seconds = tune_col1.slider(
+                            "Pre Buffer",
+                            0.5,
+                            10.0,
+                            float(latest_config.get("pre_seconds", 2.0)),
+                            0.5,
+                            key=f"portal_match_custom_pre_{selected_match_id}",
+                        )
+                        post_seconds = tune_col2.slider(
+                            "Post Buffer",
+                            1.0,
+                            20.0,
+                            float(latest_config.get("post_seconds", 6.0)),
+                            0.5,
+                            key=f"portal_match_custom_post_{selected_match_id}",
+                        )
+                        min_clip = tune_col3.slider(
+                            "Min Clip",
+                            1.0,
+                            15.0,
+                            float(latest_config.get("min_clip_duration", 4.0)),
+                            0.5,
+                            key=f"portal_match_custom_min_clip_{selected_match_id}",
+                        )
+
+                        tune_col4, tune_col5, tune_col6 = st.columns(3)
+                        speed_sens = tune_col4.slider(
+                            "Speed Sensitivity",
+                            1.0,
+                            4.0,
+                            float(latest_config.get("speed_sensitivity", 2.0)),
+                            0.1,
+                            key=f"portal_match_custom_speed_{selected_match_id}",
+                        )
+                        audio_sens = tune_col5.slider(
+                            "Audio Sensitivity",
+                            1.0,
+                            4.0,
+                            float(latest_config.get("audio_sensitivity", 2.0)),
+                            0.1,
+                            key=f"portal_match_custom_audio_{selected_match_id}",
+                        )
+                        threads = int(
+                            tune_col6.number_input(
+                                "Threads (0=auto)",
+                                min_value=0,
+                                max_value=32,
+                                value=int(latest_config.get("threads", 0) or 0),
+                                key=f"portal_match_custom_threads_{selected_match_id}",
+                            )
+                        )
+
+                    with st.expander("Player Lock", expanded=False):
+                        player_roi_payload = _render_player_roi_selector(
+                            context_key=f"portal_match_custom_{selected_match_id}",
+                            default_enabled=bool(latest_config.get("player_roi")),
+                            existing_roi=(latest_config.get("player_roi") if isinstance(latest_config.get("player_roi"), dict) else None),
+                            source_video_path=source_video or "",
+                        )
+
+                summary_col1, summary_col2, summary_col3, summary_col4 = st.columns(4)
+                summary_col1.metric("Window", trim_window["label"])
+                summary_col2.metric("Mode", "Analysis" if analysis_only else "Clips")
+                summary_col3.metric("Camera", str(camera_mode))
+                summary_col4.metric("GPU", "Required" if require_gpu else "Optional")
 
                 if st.button("Reprocess This Match (Custom)", key=f"portal_match_reprocess_custom_{selected_match_id}"):
                     if player_roi_payload.get("enabled") and not player_roi_payload.get("roi"):
@@ -2992,7 +3669,12 @@ elif nav_key == "Game Library":
                             "analysis_only": bool(analysis_only),
                             "run_created_at": datetime.utcnow().isoformat(),
                             "run_created_from": "portal_match_workspace_custom",
+                            "test_window_enabled": bool(trim_window["enabled"]),
+                            "log_profile": log_profile,
                         }
+                        if trim_window["enabled"]:
+                            next_config["trim_start"] = float(trim_window["trim_start"])
+                            next_config["trim_end"] = float(trim_window["trim_end"])
                         if player_roi_payload.get("roi"):
                             next_config["player_roi"] = dict(player_roi_payload["roi"])
                         if threads > 0:
@@ -3027,8 +3709,10 @@ elif nav_key == "Game Library":
                 with st.expander(exp_title, expanded=(idx == 0)):
                     st.markdown(_build_stage_tracker(job.get("stage"), job.get("status")), unsafe_allow_html=True)
                     st.progress(float(job.get("progress", 0.0)))
+                    _render_job_outcome_notice(job)
                     st.write(f"Model: `{job.get('config', {}).get('model_version', '-')}`")
                     st.write(f"Camera: `{job.get('config', {}).get('camera_mode', 'wide')}`")
+                    st.write(f"Window: `{_format_trim_window(job.get('config', {}) or {})}`")
                     st.write(f"Targets: `{_focus_targets_from_config(job.get('config', {}))}`")
                     st.write(f"Analysis-only: `{bool(job.get('config', {}).get('analysis_only', False))}`")
                     st.write(f"Bookmarks detected: `{int((job.get('result', {}) or {}).get('bookmarks_count', 0) or 0)}`")
@@ -3127,61 +3811,61 @@ else:
     kill_job = op_col3.button("Kill Session", key="portal_ops_kill_job")
     worker_tick = op_col4.button("Worker Run Once", key="portal_ops_worker_tick")
 
-    st.subheader("Queue Controls")
-    default_scope_match = str(st.session_state.selected_match_id or "").strip()
-    if default_scope_match and not str(st.session_state.get("portal_ops_match_scope", "")).strip():
-        st.session_state.portal_ops_match_scope = default_scope_match
-    match_scope = st.text_input("Match ID Scope (bulk queue actions)", value=default_scope_match, key="portal_ops_match_scope")
-    if match_scope.strip():
-        scoped_jobs = list_match_jobs(api_base, tenant_id, token, match_scope.strip(), limit=500)
-        queued_jobs = [job for job in scoped_jobs if str(job.get("status", "")).lower() == "queued"]
-        active_jobs = [
-            job
-            for job in scoped_jobs
-            if str(job.get("status", "")).lower() in {"queued", "claimed", "running", "cancel_requested"}
-        ]
-        q_col1, q_col2, q_col3 = st.columns(3)
-        q_col1.metric("Scoped Jobs", len(scoped_jobs))
-        q_col2.metric("Queued Jobs", len(queued_jobs))
-        q_col3.metric("Active Jobs", len(active_jobs))
+    with st.expander("Queue Controls", expanded=is_technical):
+        default_scope_match = str(st.session_state.selected_match_id or "").strip()
+        if default_scope_match and not str(st.session_state.get("portal_ops_match_scope", "")).strip():
+            st.session_state.portal_ops_match_scope = default_scope_match
+        match_scope = st.text_input("Match ID Scope", value=default_scope_match, key="portal_ops_match_scope")
+        if match_scope.strip():
+            scoped_jobs = list_match_jobs(api_base, tenant_id, token, match_scope.strip(), limit=500)
+            queued_jobs = [job for job in scoped_jobs if str(job.get("status", "")).lower() == "queued"]
+            active_jobs = [
+                job
+                for job in scoped_jobs
+                if str(job.get("status", "")).lower() in {"queued", "claimed", "running", "cancel_requested"}
+            ]
+            q_col1, q_col2, q_col3 = st.columns(3)
+            q_col1.metric("Scoped Jobs", len(scoped_jobs))
+            q_col2.metric("Queued Jobs", len(queued_jobs))
+            q_col3.metric("Active Jobs", len(active_jobs))
 
-        queue_col1, queue_col2 = st.columns(2)
-        kill_all_queued = queue_col1.button(
-            "Kill All Queued (Match Scope)",
-            key="portal_ops_kill_all_queued",
-            disabled=not queued_jobs,
-        )
-        kill_all_active = queue_col2.button(
-            "Kill All Active (Match Scope)",
-            key="portal_ops_kill_all_active",
-            disabled=not active_jobs,
-        )
-        if kill_all_queued or kill_all_active:
-            targets = queued_jobs if kill_all_queued else active_jobs
-            successes = 0
-            failures = 0
-            for target in targets:
-                target_job_id = str(target.get("job_id", "")).strip()
-                if not target_job_id:
-                    continue
-                kill_result = api_request(
-                    "POST",
-                    api_base,
-                    f"/jobs/{target_job_id}/kill-session",
-                    tenant_id,
-                    token,
-                    json_body={},
-                )
-                if kill_result["ok"]:
-                    successes += 1
-                else:
-                    failures += 1
-            st.session_state.portal_flash_message = (
-                f"Bulk kill completed for match {match_scope.strip()}: success={successes}, failed={failures}"
+            queue_col1, queue_col2 = st.columns(2)
+            kill_all_queued = queue_col1.button(
+                "Kill All Queued",
+                key="portal_ops_kill_all_queued",
+                disabled=not queued_jobs,
             )
-            safe_rerun()
-    else:
-        st.caption("Provide Match ID scope to bulk-kill queued jobs.")
+            kill_all_active = queue_col2.button(
+                "Kill All Active",
+                key="portal_ops_kill_all_active",
+                disabled=not active_jobs,
+            )
+            if kill_all_queued or kill_all_active:
+                targets = queued_jobs if kill_all_queued else active_jobs
+                successes = 0
+                failures = 0
+                for target in targets:
+                    target_job_id = str(target.get("job_id", "")).strip()
+                    if not target_job_id:
+                        continue
+                    kill_result = api_request(
+                        "POST",
+                        api_base,
+                        f"/jobs/{target_job_id}/kill-session",
+                        tenant_id,
+                        token,
+                        json_body={},
+                    )
+                    if kill_result["ok"]:
+                        successes += 1
+                    else:
+                        failures += 1
+                st.session_state.portal_flash_message = (
+                    f"Bulk kill completed for match {match_scope.strip()}: success={successes}, failed={failures}"
+                )
+                safe_rerun()
+        else:
+            st.caption("Provide a Match ID to bulk-kill queued or active jobs.")
 
     if worker_tick:
         tick_result = api_request("POST", api_base, "/jobs/worker/run-once", tenant_id, token, json_body={})
@@ -3213,10 +3897,9 @@ else:
             st.session_state.selected_job_id = payload["job_id"]
             st.markdown(_build_stage_tracker(payload.get("stage"), payload.get("status")), unsafe_allow_html=True)
             st.progress(float(payload.get("progress", 0.0)))
-            metrics_col1, metrics_col2, metrics_col3 = st.columns(3)
-            metrics_col1.metric("Status", payload.get("status", "-"))
-            metrics_col2.metric("Stage", payload.get("stage", "-"))
-            metrics_col3.metric("Cancel Requested", str(payload.get("cancel_requested", False)))
+            diagnostics = get_job_diagnostics(api_base, tenant_id, token, job_id_value)
+            _render_job_diagnostics_panel(diagnostics, is_technical=is_technical)
+            st.caption(f"Cancel requested: `{bool(payload.get('cancel_requested', False))}`")
             if is_technical:
                 st.write("Config")
                 st.json(payload.get("config", {}))
@@ -3225,6 +3908,7 @@ else:
             else:
                 st.write(f"Model: `{payload.get('config', {}).get('model_version', '-')}`")
                 st.write(f"Camera: `{payload.get('config', {}).get('camera_mode', 'wide')}`")
+                st.write(f"Window: `{_format_trim_window(payload.get('config', {}) or {})}`")
                 st.write(f"Targets: `{_focus_targets_from_config(payload.get('config', {}))}`")
                 st.write(f"Bookmarks: `{int((payload.get('result', {}) or {}).get('bookmarks_count', 0) or 0)}`")
             status_value = str(payload.get("status", "")).lower()
@@ -3299,7 +3983,7 @@ else:
 
     if is_technical:
         st.subheader("Log Inspector")
-        log_col1, log_col2, log_col3, log_col4 = st.columns(4)
+        log_col1, log_col2, log_col3, log_col4, log_col5 = st.columns(5)
         with log_col1:
             level_filter = st.selectbox(
                 "Level",
@@ -3318,6 +4002,13 @@ else:
             stage_filter = st.text_input("Stage Filter", value="", key="portal_ops_log_stage")
         with log_col4:
             log_limit = st.number_input("Limit", min_value=10, max_value=5000, value=300, key="portal_ops_log_limit")
+        with log_col5:
+            log_view = st.selectbox(
+                "View",
+                ["Process Story", "Technical Table", "Raw Rows"],
+                index=0,
+                key="portal_ops_log_view",
+            )
 
         if st.button("Fetch Logs", key="portal_ops_fetch_logs"):
             if not job_id_input.strip():
@@ -3343,7 +4034,42 @@ else:
                 else:
                     items = list(log_result["payload"].get("items", []))
                     st.write(f"Log rows: {len(items)}")
-                    st.dataframe(items, use_container_width=True, hide_index=True)
+                    if log_view == "Process Story":
+                        rows = []
+                        for item in items:
+                            if not isinstance(item, dict):
+                                continue
+                            data = item.get("data") if isinstance(item.get("data"), dict) else {}
+                            rows.append(
+                                {
+                                    "time": _iso_to_short(item.get("created_at")),
+                                    "level": item.get("level"),
+                                    "stage": item.get("stage"),
+                                    "process": data.get("process_message") or item.get("message"),
+                                    "technical": data.get("technical_message") or "",
+                                }
+                            )
+                        st.dataframe(rows, use_container_width=True, hide_index=True)
+                    elif log_view == "Technical Table":
+                        rows = []
+                        for item in items:
+                            if not isinstance(item, dict):
+                                continue
+                            data = item.get("data") if isinstance(item.get("data"), dict) else {}
+                            rows.append(
+                                {
+                                    "time": _iso_to_short(item.get("created_at")),
+                                    "level": item.get("level"),
+                                    "detail": item.get("detail_level"),
+                                    "stage": item.get("stage"),
+                                    "message": item.get("message"),
+                                    "technical": data.get("technical_message") or "",
+                                    "log_profile": data.get("log_profile") or "",
+                                }
+                            )
+                        st.dataframe(rows, use_container_width=True, hide_index=True)
+                    else:
+                        st.dataframe(items, use_container_width=True, hide_index=True)
 
 current_mode_code = "technical" if is_technical else "user"
 current_view_code = _view_code_from_nav(nav_key=nav_key, is_technical=is_technical)
