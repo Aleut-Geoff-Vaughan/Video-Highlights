@@ -98,6 +98,21 @@ python -m pip install "pillow<12,>=9.2.0"
 
 The portal sidebar shows whether PyTorch CUDA is ready and whether FFmpeg can see `h264_nvenc` for GPU clip rendering. When **Require GPU** is enabled, jobs fail early if CUDA is not available.
 
+The main analysis controls include a **GPU Analysis** section. The current default is `yolo26s.pt`, `botsort.yaml`, image size `960`, confidence `0.18`, and frame stride `1`. For heavier GPU use and better small-player detection, try `yolo26m.pt` with image size `1280`; for quick smoke tests, lower image size or increase frame stride. You can also provide a custom `.pt` path from a fine-tuned detector.
+
+### YOLO Detector Training
+
+The Training Lab can launch real Ultralytics detector training from a YOLO dataset YAML. The training run writes a normal Ultralytics `best.pt`; paste that path into **GPU Analysis > Custom Detector Weights** for future processing runs.
+
+API example:
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/training/runs ^
+  -H "Content-Type: application/json" ^
+  -H "X-Tenant-Id: sandbox" ^
+  -d "{\"target_model\":\"yolo-detector\",\"training_config\":{\"kind\":\"ultralytics_yolo\",\"dataset_yaml\":\"C:\\\\datasets\\\\soccer\\\\data.yaml\",\"base_model\":\"yolo26s.pt\",\"epochs\":50,\"imgsz\":960,\"batch\":8,\"device\":\"0\"}}"
+```
+
 ### Run API Client UI (Streamlit)
 
 ```bash
@@ -205,9 +220,17 @@ Ollama local:
 
 ```bash
 set VH_LLM_PROVIDER=ollama
-set VH_LLM_MODEL=llama3.2:3b
+set VH_LLM_MODEL=gemma4:e2b
 set VH_LLM_BASE_URL=http://127.0.0.1:11434
 ```
+
+Check the active AI configuration:
+
+```bash
+curl -H "X-Tenant-Id: sandbox" http://127.0.0.1:8000/v1/agent/status
+```
+
+The Streamlit match assistant also shows provider, model, reachability, and local setup hints.
 
 OpenAI-compatible local servers (LM Studio, vLLM, llama.cpp server, Ollama `/v1` mode):
 
@@ -222,6 +245,12 @@ Optional timeout override:
 
 ```bash
 set VH_LLM_TIMEOUT_SECONDS=20
+```
+
+By default, Ollama models are unloaded immediately after each assistant response so the GPU stays available for video analysis. Override only if you want faster back-to-back assistant chats:
+
+```bash
+set VH_LLM_KEEP_ALIVE=5m
 ```
 
 ### Multi-tenant and Admin API

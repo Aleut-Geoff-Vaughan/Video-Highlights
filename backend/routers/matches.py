@@ -15,6 +15,7 @@ from ..models import Match
 from ..schemas import MatchCreate, MatchLocalAssetRegister, MatchPatch, MatchRead
 from ..serializers import match_to_read
 from ..services.ffmpeg_tools import ffprobe_exe
+from ..services.media_timeline import build_media_timeline
 from ..services.storage import get_storage_backend
 from ..tenant import TenantContext, get_tenant_context
 from ..utils import decode_cursor, encode_cursor, utcnow
@@ -133,6 +134,23 @@ def _validate_local_video_path(path: str) -> Dict[str, Any]:
     }
 
 
+def _resolve_source_video_path(match: Match) -> str:
+    candidates = [str(match.source_video_path or "").strip()]
+    metadata = dict(match.metadata_json or {})
+    assets = list(metadata.get("assets", []) or [])
+    for asset in assets:
+        path = str(asset.get("path", "")).strip()
+        if path:
+            candidates.append(path)
+    for path in candidates:
+        if path and os.path.exists(path):
+            return path
+    for path in candidates:
+        if path:
+            return path
+    return ""
+
+
 @router.post("", response_model=MatchRead, status_code=201)
 def create_match(
     payload: MatchCreate,
@@ -206,6 +224,36 @@ def get_match(
     if not match or match.tenant_id != tenant.tenant_id:
         raise HTTPException(status_code=404, detail=f"Match not found: {match_id}")
     return match_to_read(match)
+
+
+@router.get("/{match_id}/timeline", response_model=Dict[str, Any])
+def get_match_timeline(
+    match_id: str,
+    thumbnail_count: int = Query(default=18, ge=4, le=48),
+    waveform_bins: int = Query(default=96, ge=16, le=360),
+    session: Session = Depends(get_session),
+    _: UserContext = Depends(require_roles("admin", "analyst", "coach", "parent", "system", "tenant_admin")),
+    tenant: TenantContext = Depends(get_tenant_context),
+) -> Dict[str, Any]:
+    match = session.get(Match, match_id)
+    if not match or match.tenant_id != tenant.tenant_id:
+        raise HTTPException(status_code=404, detail=f"Match not found: {match_id}")
+    source_video = _resolve_source_video_path(match)
+    if not source_video:
+        raise HTTPException(status_code=400, detail="Match has no source video")
+    if not os.path.exists(source_video):
+        raise HTTPException(status_code=400, detail=f"Source video path not found: {source_video}")
+    try:
+        timeline = build_media_timeline(
+            source_video,
+            thumbnail_count=thumbnail_count,
+            waveform_bins=waveform_bins,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to build media timeline: {exc}") from exc
+    timeline["match_id"] = match_id
+    timeline["source_video_path"] = source_video
+    return timeline
 
 
 @router.patch("/{match_id}", response_model=MatchRead)

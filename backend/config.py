@@ -17,6 +17,8 @@ class Settings:
     llm_base_url: str | None = os.getenv("VH_LLM_BASE_URL")
     llm_api_key: str | None = os.getenv("VH_LLM_API_KEY")
     llm_timeout_seconds: float = float(os.getenv("VH_LLM_TIMEOUT_SECONDS", "20"))
+    llm_keep_alive: str = os.getenv("VH_LLM_KEEP_ALIVE", "0")
+    rnnoise_model_path: str | None = os.getenv("VH_RNNOISE_MODEL_PATH")
     openai_api_key: str | None = os.getenv("OPENAI_API_KEY")
     job_execution_mode: str = os.getenv("VH_JOB_EXECUTION_MODE", "inline").lower()
     storage_backend: str = os.getenv("VH_STORAGE_BACKEND", "local").lower()

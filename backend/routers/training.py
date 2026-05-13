@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Optional
 
@@ -78,11 +79,26 @@ def create_training_run(
     _: UserContext = Depends(require_roles("admin", "analyst", "tenant_admin")),
     tenant: TenantContext = Depends(get_tenant_context),
 ) -> TrainingRunRead:
-    batch = session.get(TrainingFeedbackBatch, payload.batch_id)
-    if not batch or batch.tenant_id != tenant.tenant_id:
-        raise HTTPException(status_code=404, detail=f"Feedback batch not found: {payload.batch_id}")
+    training_config = dict(payload.training_config or {})
+    training_kind = str(training_config.get("kind") or training_config.get("training_type") or "").strip().lower()
+    batch = None
+    if payload.batch_id:
+        batch = session.get(TrainingFeedbackBatch, payload.batch_id)
+        if not batch or batch.tenant_id != tenant.tenant_id:
+            raise HTTPException(status_code=404, detail=f"Feedback batch not found: {payload.batch_id}")
+    elif training_kind != "ultralytics_yolo":
+        raise HTTPException(status_code=400, detail="batch_id is required unless training_config.kind is 'ultralytics_yolo'")
 
-    run = TrainingRun(tenant_id=tenant.tenant_id, batch_id=batch.id, target_model=payload.target_model, notes=payload.notes)
+    notes_payload = {
+        "notes": payload.notes,
+        "training_config": training_config,
+    }
+    run = TrainingRun(
+        tenant_id=tenant.tenant_id,
+        batch_id=batch.id if batch else None,
+        target_model=payload.target_model,
+        notes=json.dumps(notes_payload, sort_keys=True),
+    )
     session.add(run)
     session.commit()
     session.refresh(run)

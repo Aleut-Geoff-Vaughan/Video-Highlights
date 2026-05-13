@@ -27,6 +27,54 @@ class AgentService:
     def model(self) -> str:
         return str(settings.llm_model or "").strip() or "gpt-4o-mini"
 
+    def status(self) -> Dict[str, object]:
+        provider = self.provider
+        status: Dict[str, object] = {
+            "provider": provider,
+            "model": self.model if provider != "none" else None,
+            "configured": provider in {"openai", "openai_compatible", "ollama"},
+            "base_url": settings.llm_base_url,
+            "reachable": None,
+            "message": "",
+        }
+        if provider == "none":
+            status["message"] = "LLM provider is not configured; assistant will use deterministic fallback answers."
+            return status
+        if provider == "openai" and not settings.openai_api_key:
+            status["configured"] = False
+            status["reachable"] = False
+            status["message"] = "OPENAI_API_KEY is not set."
+            return status
+        if provider == "openai_compatible" and not settings.llm_base_url:
+            status["configured"] = False
+            status["reachable"] = False
+            status["message"] = "VH_LLM_BASE_URL is required for OpenAI-compatible local servers."
+            return status
+        if provider == "ollama":
+            base_url = str(settings.llm_base_url or "http://127.0.0.1:11434").rstrip("/")
+            if base_url.endswith("/v1"):
+                base_url = base_url[:-3].rstrip("/")
+            status["base_url"] = base_url
+            try:
+                response = requests.get(f"{base_url}/api/tags", timeout=min(5.0, float(settings.llm_timeout_seconds)))
+                response.raise_for_status()
+                payload = response.json()
+                models = [str(item.get("name")) for item in list(payload.get("models", []) or []) if isinstance(item, dict)]
+                status["reachable"] = True
+                status["models"] = models
+                if self.model not in models:
+                    status["configured"] = False
+                    status["message"] = f"Ollama is reachable, but model '{self.model}' is not installed. Run `ollama pull {self.model}`."
+                    return status
+                status["message"] = "Ollama is reachable."
+            except Exception as exc:
+                status["reachable"] = False
+                status["message"] = f"Ollama is not reachable: {exc}"
+            return status
+
+        status["message"] = "Provider configuration will be checked when a request is sent."
+        return status
+
     def query_match(
         self,
         session: Session,
@@ -319,6 +367,7 @@ class AgentService:
         body = {
             "model": self.model,
             "stream": False,
+            "keep_alive": settings.llm_keep_alive,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},

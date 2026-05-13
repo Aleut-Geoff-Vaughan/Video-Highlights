@@ -16,6 +16,7 @@ from ..database import session_scope
 from ..models import Event, Match, ProcessingJob, TrainingFeedbackBatch, TrainingRun
 from .gpu_status import get_gpu_status
 from .job_logging import append_job_log
+from .yolo_training import train_ultralytics_yolo
 from ..utils import ensure_dir
 
 
@@ -35,6 +36,16 @@ def _read_analysis_manifest(output_dir: str) -> Dict[str, object]:
     except Exception:
         return {}
     return {}
+
+
+def _training_notes_payload(raw_notes: Optional[str]) -> Dict[str, Any]:
+    if not raw_notes:
+        return {}
+    try:
+        payload = json.loads(raw_notes)
+    except Exception:
+        return {"notes": raw_notes}
+    return payload if isinstance(payload, dict) else {"notes": raw_notes}
 
 
 _LOG_PROFILE_RANK = {"standard": 0, "detailed": 1, "diagnostic": 2}
@@ -103,6 +114,47 @@ def _primary_source_asset_id(match: Match) -> Optional[str]:
     source = matched or assets[0]
     value = source.get("asset_id")
     return str(value) if value else None
+
+
+def recover_interrupted_inline_jobs(session) -> int:
+    if settings.job_execution_mode != "inline":
+        return 0
+
+    interrupted = list(
+        session.exec(
+            select(ProcessingJob).where(
+                ProcessingJob.status.in_(["claimed", "running", "cancel_requested"])
+            )
+        )
+    )
+    recovered = 0
+    for job in interrupted:
+        previous_status = str(job.status or "")
+        job.status = "failed"
+        job.stage = "failed"
+        job.progress = min(float(job.progress or 0.0), 0.99)
+        job.error_message = (
+            "Processing was interrupted before completion, likely because the API process restarted. "
+            "Create a new run from the same config."
+        )
+        job.completed_at = _utcnow()
+        job.updated_at = _utcnow()
+        session.add(job)
+        append_job_log(
+            session=session,
+            job_id=job.id,
+            tenant_id=job.tenant_id,
+            level="warning",
+            stage="failed",
+            message="Recovered interrupted inline job after API startup",
+            detail_level="basic",
+            data={
+                "previous_status": previous_status,
+                "reason": "Inline processing jobs cannot survive an API process restart.",
+            },
+        )
+        recovered += 1
+    return recovered
 
 
 def _normalize_event_type(value: object, fallback: str = "shot") -> str:
@@ -536,8 +588,82 @@ class JobRunner:
                             "camera_mode": str(config.get("camera_mode") or "wide"),
                             "zoom_factor": config.get("zoom_factor", 1.6),
                             "player_roi_enabled": isinstance(config.get("player_roi"), dict),
+                            "yolo_model": config.get("yolo_model", "yolo26s.pt"),
+                            "tracker_config": config.get("tracker_config", "botsort.yaml"),
+                            "inference_imgsz": config.get("inference_imgsz", 960),
+                            "detection_conf": config.get("detection_conf", 0.18),
+                            "vid_stride": config.get("vid_stride", 1),
                         },
                     )
+
+            progress_state: Dict[str, Any] = {
+                "last_at": None,
+                "last_progress": 0.0,
+                "last_sub_stage": "",
+                "last_message": "",
+            }
+
+            def _record_engine_progress(
+                sub_stage: str,
+                progress: float,
+                message: str,
+                data: Optional[Dict[str, object]] = None,
+            ) -> None:
+                stage_key = str(sub_stage or "processing").strip().lower()
+                message_text = str(message or stage_key).strip()
+                try:
+                    progress_value = max(0.0, min(0.99, float(progress)))
+                except Exception:
+                    progress_value = float(progress_state.get("last_progress") or 0.0)
+                now = _utcnow()
+                last_at = progress_state.get("last_at")
+                seconds_since_last = (
+                    (now - last_at).total_seconds()
+                    if isinstance(last_at, datetime)
+                    else 999.0
+                )
+                stage_changed = stage_key != str(progress_state.get("last_sub_stage") or "")
+                progress_moved = progress_value >= float(progress_state.get("last_progress") or 0.0) + 0.015
+                message_changed = message_text != str(progress_state.get("last_message") or "")
+                important = stage_changed or progress_moved or progress_value >= 0.98 or message_changed
+                if not important and seconds_since_last < 2.0:
+                    return
+
+                with session_scope() as progress_session:
+                    progress_job = progress_session.get(ProcessingJob, job_id)
+                    if not progress_job:
+                        return
+                    if str(progress_job.status or "").lower() not in {"claimed", "running", "cancel_requested"}:
+                        return
+                    progress_config = progress_job.config_json or {}
+                    current_progress = float(progress_job.progress or 0.0)
+                    progress_job.progress = max(current_progress, progress_value)
+                    progress_job.stage = "processing_video"
+                    progress_job.updated_at = now
+                    progress_session.add(progress_job)
+                    append_job_log(
+                        session=progress_session,
+                        job_id=progress_job.id,
+                        tenant_id=progress_job.tenant_id,
+                        level="info",
+                        stage="processing_video",
+                        message=message_text,
+                        detail_level="detailed",
+                        data={
+                            "sub_stage": stage_key,
+                            "progress": round(progress_job.progress, 4),
+                            **dict(data or {}),
+                        },
+                        force_persist=_profile_allows(progress_config, "detailed"),
+                    )
+                progress_state.update(
+                    {
+                        "last_at": now,
+                        "last_progress": progress_value,
+                        "last_sub_stage": stage_key,
+                        "last_message": message_text,
+                    }
+                )
 
             success = process_video_highlights(
                 video_path=video_path,
@@ -560,6 +686,12 @@ class JobRunner:
                 camera_mode=str(config.get("camera_mode") or "wide"),
                 zoom_factor=float(config.get("zoom_factor", 1.6)),
                 player_roi=dict(config.get("player_roi") or {}) if isinstance(config.get("player_roi"), dict) else None,
+                yolo_model=str(config.get("yolo_model") or "yolo26s.pt"),
+                tracker_config=str(config.get("tracker_config") or "botsort.yaml"),
+                inference_imgsz=int(config.get("inference_imgsz", 960) or 960),
+                detection_conf=float(config.get("detection_conf", 0.18) or 0.18),
+                vid_stride=int(config.get("vid_stride", 1) or 1),
+                progress_callback=_record_engine_progress,
             )
 
             artifacts = sorted(str(path.resolve()) for path in Path(output_dir).glob("*.mp4"))
@@ -754,21 +886,32 @@ class JobRunner:
 
                 batch = session.get(TrainingFeedbackBatch, run.batch_id) if run.batch_id else None
                 item_count = int(batch.item_count) if batch else 0
-                candidate_version = f"{run.target_model}.{_utcnow().strftime('%Y%m%d%H%M%S')}"
+                notes_payload = _training_notes_payload(run.notes)
+                training_config = dict(notes_payload.get("training_config") or {})
+                training_kind = str(training_config.get("kind") or training_config.get("training_type") or "").strip().lower()
 
-                # Deterministic placeholder metrics for V1 workflow wiring.
-                base = min(0.95, 0.60 + (item_count / 1000.0))
-                metrics = {
-                    "goal_precision": round(base, 3),
-                    "goal_recall": round(max(0.4, base - 0.04), 3),
-                    "foul_precision": round(max(0.35, base - 0.20), 3),
-                    "foul_recall": round(max(0.30, base - 0.25), 3),
-                    "feedback_items_used": item_count,
-                }
+                if training_kind == "ultralytics_yolo":
+                    result = train_ultralytics_yolo(training_config)
+                    run.candidate_model_version = str(result["candidate_model_version"])
+                    run.metrics_json = dict(result.get("metrics") or {})
+                    run.gates_passed = bool(result.get("gates_passed", False))
+                else:
+                    candidate_version = f"{run.target_model}.{_utcnow().strftime('%Y%m%d%H%M%S')}"
 
-                run.candidate_model_version = candidate_version
-                run.metrics_json = metrics
-                run.gates_passed = item_count >= 20
+                    # Deterministic metrics keep feedback-model promotion testable until event model training is added.
+                    base = min(0.95, 0.60 + (item_count / 1000.0))
+                    metrics = {
+                        "goal_precision": round(base, 3),
+                        "goal_recall": round(max(0.4, base - 0.04), 3),
+                        "foul_precision": round(max(0.35, base - 0.20), 3),
+                        "foul_recall": round(max(0.30, base - 0.25), 3),
+                        "feedback_items_used": item_count,
+                        "training_type": "feedback_event_model",
+                    }
+
+                    run.candidate_model_version = candidate_version
+                    run.metrics_json = metrics
+                    run.gates_passed = item_count >= 20
                 run.status = "completed"
                 run.updated_at = _utcnow()
 

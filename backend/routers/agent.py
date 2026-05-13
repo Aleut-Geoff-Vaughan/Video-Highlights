@@ -19,6 +19,13 @@ def _ensure_match(session: Session, match_id: str, tenant_id: str) -> None:
         raise HTTPException(status_code=404, detail=f"Match not found: {match_id}")
 
 
+@router.get("/agent/status")
+def agent_status(
+    _: UserContext = Depends(require_roles("admin", "analyst", "coach", "parent", "system", "tenant_admin")),
+) -> dict:
+    return agent_service.status()
+
+
 @router.post("/matches/{match_id}/agent/query", response_model=AgentQueryResponse)
 def agent_query(
     match_id: str,

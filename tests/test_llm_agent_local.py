@@ -24,11 +24,13 @@ def test_agent_service_uses_ollama_provider(monkeypatch) -> None:
     monkeypatch.setattr(settings, "llm_model", "llama3.2:3b")
     monkeypatch.setattr(settings, "llm_base_url", "http://127.0.0.1:11434")
     monkeypatch.setattr(settings, "llm_timeout_seconds", 5.0)
+    monkeypatch.setattr(settings, "llm_keep_alive", "0")
 
     def _fake_post(url, json, timeout):  # noqa: ANN001
         assert url == "http://127.0.0.1:11434/api/chat"
         assert json["model"] == "llama3.2:3b"
         assert json["stream"] is False
+        assert json["keep_alive"] == "0"
         assert timeout == 5.0
         return _FakeResponse({"message": {"content": "Local model summary"}})
 
@@ -68,6 +70,47 @@ def test_agent_service_falls_back_when_ollama_returns_no_text(monkeypatch) -> No
     )
     assert result["provider"] == "fallback"
     assert result["model"] is None
+
+
+def test_agent_status_reports_reachable_ollama_models(monkeypatch) -> None:
+    service = AgentService()
+    monkeypatch.setattr(settings, "llm_provider", "ollama")
+    monkeypatch.setattr(settings, "llm_model", "gemma4:e2b")
+    monkeypatch.setattr(settings, "llm_base_url", "http://127.0.0.1:11434")
+    monkeypatch.setattr(settings, "llm_timeout_seconds", 5.0)
+
+    def _fake_get(url, timeout):  # noqa: ANN001
+        assert url == "http://127.0.0.1:11434/api/tags"
+        assert timeout == 5.0
+        return _FakeResponse({"models": [{"name": "gemma4:e2b"}]})
+
+    monkeypatch.setattr("backend.services.llm_agent.requests.get", _fake_get)
+
+    status = service.status()
+
+    assert status["provider"] == "ollama"
+    assert status["model"] == "gemma4:e2b"
+    assert status["reachable"] is True
+    assert status["models"] == ["gemma4:e2b"]
+
+
+def test_agent_status_reports_missing_ollama_model(monkeypatch) -> None:
+    service = AgentService()
+    monkeypatch.setattr(settings, "llm_provider", "ollama")
+    monkeypatch.setattr(settings, "llm_model", "missing-model")
+    monkeypatch.setattr(settings, "llm_base_url", "http://127.0.0.1:11434")
+    monkeypatch.setattr(settings, "llm_timeout_seconds", 5.0)
+
+    monkeypatch.setattr(
+        "backend.services.llm_agent.requests.get",
+        lambda url, timeout: _FakeResponse({"models": [{"name": "gemma4:e2b"}]}),
+    )
+
+    status = service.status()
+
+    assert status["configured"] is False
+    assert status["reachable"] is True
+    assert "ollama pull missing-model" in status["message"]
 
 
 def test_prepare_llm_payload_includes_match_and_signal_context() -> None:

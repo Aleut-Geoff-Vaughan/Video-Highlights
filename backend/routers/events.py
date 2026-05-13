@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, UploadFile
 from sqlmodel import Session, select
 
 from ..auth import UserContext, require_roles
@@ -14,6 +15,7 @@ from ..config import settings
 from ..database import get_session
 from ..models import Event, Match
 from ..schemas import (
+    AudioEditRead,
     EventClipRead,
     EventClipRequest,
     EventPatch,
@@ -23,6 +25,7 @@ from ..schemas import (
     HighlightExportRequest,
 )
 from ..serializers import event_to_read
+from ..services.audio_editor import render_audio_edit
 from ..services.event_clip_renderer import concat_clips_ffmpeg, render_clip_ffmpeg
 from ..services.follow_cam import render_follow_cam_clip
 from ..services.storage import get_storage_backend
@@ -30,6 +33,11 @@ from ..tenant import TenantContext, get_tenant_context
 from ..utils import decode_cursor, encode_cursor, ensure_dir, generate_id, utcnow
 
 router = APIRouter(tags=["events"])
+
+
+def _safe_filename_slug(value: str, fallback: str = "audio-edit") -> str:
+    slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", str(value or "").strip()).strip("-._")
+    return slug[:80] or fallback
 
 
 def _ensure_match(session: Session, match_id: str, tenant_id: str) -> Match:
@@ -512,6 +520,128 @@ def export_selected_highlights(
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to export selected highlights: {exc}") from exc
     finally:
+        try:
+            shutil.rmtree(temp_root, ignore_errors=True)
+        except Exception:
+            pass
+
+
+@router.post("/matches/{match_id}/audio/render", response_model=AudioEditRead)
+def render_match_audio_edit(
+    match_id: str,
+    mode: str = Form(default="keep"),
+    cleanup_profile: str = Form(default="none"),
+    original_volume: float = Form(default=1.0, ge=0.0, le=2.0),
+    music_volume: float = Form(default=0.35, ge=0.0, le=2.0),
+    loop_external_audio: bool = Form(default=True),
+    title: Optional[str] = Form(default=None),
+    expires_seconds: int = Form(default=3600, ge=60, le=86400),
+    audio_file: Optional[UploadFile] = File(default=None),
+    session: Session = Depends(get_session),
+    _: UserContext = Depends(require_roles("admin", "analyst", "coach", "tenant_admin")),
+    tenant: TenantContext = Depends(get_tenant_context),
+) -> AudioEditRead:
+    match = _ensure_match(session, match_id, tenant.tenant_id)
+    source_video = _resolve_source_video_path(match)
+    if not source_video:
+        raise HTTPException(status_code=400, detail="Match has no source video")
+    if not os.path.exists(source_video):
+        raise HTTPException(status_code=400, detail=f"Source video path not found: {source_video}")
+
+    audio_edit_id = generate_id("audio")
+    temp_root = ensure_dir(os.path.join(settings.output_root, "audio_edit_tmp", match_id, audio_edit_id))
+    external_audio_path: Optional[str] = None
+    output_temp_path = os.path.join(temp_root, f"{audio_edit_id}.mp4")
+    try:
+        if audio_file is not None and audio_file.filename:
+            suffix = Path(audio_file.filename).suffix or ".mp3"
+            external_audio_path = os.path.join(temp_root, f"source_audio{suffix}")
+            with open(external_audio_path, "wb") as handle:
+                shutil.copyfileobj(audio_file.file, handle)
+            audio_file.file.close()
+            if os.path.getsize(external_audio_path) <= 0:
+                raise HTTPException(status_code=400, detail="Uploaded audio file is empty.")
+
+        render_audio_edit(
+            source_video_path=source_video,
+            output_path=output_temp_path,
+            mode=mode,
+            cleanup_profile=cleanup_profile,
+            external_audio_path=external_audio_path,
+            original_volume=original_volume,
+            music_volume=music_volume,
+            loop_external_audio=loop_external_audio,
+        )
+
+        storage = get_storage_backend()
+        filename_base = _safe_filename_slug(title or f"{audio_edit_id}-{mode}-{cleanup_profile}")
+        export_filename = f"{filename_base}.mp4"
+        with open(output_temp_path, "rb") as stream:
+            stored = storage.save_file(
+                stream=stream,
+                key_prefix=f"{match_id}/audio_edits",
+                filename=export_filename,
+            )
+
+        created_at = utcnow().isoformat()
+        metadata = dict(match.metadata_json or {})
+        assets = list(metadata.get("assets", []) or [])
+        audio_edits = list(metadata.get("audio_edits", []) or [])
+        asset_entry = {
+            "asset_id": stored.object_id,
+            "filename": export_filename,
+            "path": stored.path,
+            "size_bytes": stored.size_bytes,
+            "storage_backend": stored.backend,
+            "uploaded_at": created_at,
+            "kind": "audio_edit",
+            "audio_edit_id": audio_edit_id,
+        }
+        edit_entry = {
+            "audio_edit_id": audio_edit_id,
+            "title": title or "Audio Edit",
+            "asset_id": stored.object_id,
+            "path": stored.path,
+            "mode": str(mode).strip().lower(),
+            "cleanup_profile": str(cleanup_profile).strip().lower(),
+            "original_volume": float(original_volume),
+            "music_volume": float(music_volume),
+            "loop_external_audio": bool(loop_external_audio),
+            "source_audio_filename": audio_file.filename if audio_file is not None else None,
+            "created_at": created_at,
+        }
+        assets.append(asset_entry)
+        audio_edits.append(edit_entry)
+        metadata["assets"] = assets[-5000:]
+        metadata["audio_edits"] = audio_edits[-5000:]
+        match.metadata_json = metadata
+        match.updated_at = utcnow()
+        session.add(match)
+        session.commit()
+
+        return AudioEditRead(
+            audio_edit_id=audio_edit_id,
+            match_id=match_id,
+            asset_id=stored.object_id,
+            path=stored.path,
+            download_url=storage.get_download_url(stored.path, expires_seconds=expires_seconds),
+            mode=str(mode).strip().lower(),
+            cleanup_profile=str(cleanup_profile).strip().lower(),
+            size_bytes=stored.size_bytes,
+            created_at=created_at,
+        )
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to render audio edit: {exc}") from exc
+    finally:
+        if audio_file is not None:
+            try:
+                audio_file.file.close()
+            except Exception:
+                pass
         try:
             shutil.rmtree(temp_root, ignore_errors=True)
         except Exception:

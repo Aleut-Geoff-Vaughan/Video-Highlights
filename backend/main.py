@@ -12,6 +12,7 @@ from .config import settings
 from .database import init_db, session_scope
 from .logging_utils import configure_runtime_logging
 from .routers import admin_global, admin_tenant, agent, auth, events, feedback, health, jobs, matches, training
+from .services.job_runner import recover_interrupted_inline_jobs
 from .tenant import ensure_seed_tenants
 from .utils import generate_id
 
@@ -21,6 +22,7 @@ async def lifespan(app: FastAPI):
     init_db()
     with session_scope() as session:
         ensure_seed_tenants(session)
+        recover_interrupted_inline_jobs(session)
     yield
 
 

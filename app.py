@@ -34,6 +34,21 @@ EVENT_TARGET_OPTIONS = [
 ]
 
 LOG_PROFILE_OPTIONS = ["Standard", "Detailed", "Diagnostic"]
+YOLO_MODEL_OPTIONS = [
+    "yolo26s.pt",
+    "yolo26n.pt",
+    "yolo26m.pt",
+    "yolo26l.pt",
+    "yolo26x.pt",
+    "yolo11s.pt",
+    "yolo11m.pt",
+    "yolov8s.pt",
+    "yolov8n.pt",
+    "Custom .pt path",
+]
+TRACKER_CONFIG_OPTIONS = ["botsort.yaml", "bytetrack.yaml"]
+INFERENCE_IMAGE_SIZE_OPTIONS = [640, 768, 960, 1280]
+VID_STRIDE_OPTIONS = [1, 2, 3, 4]
 
 ANNOUNCEMENTS = [
     {
@@ -72,17 +87,17 @@ st.markdown(
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Source+Sans+3:wght@400;600;700&display=swap');
 
 :root {
-  --bg: #eef2f4;
+  --bg: #f8f8f8;
   --panel: #ffffff;
-  --panel-soft: #f7f9fa;
-  --ink: #151f29;
-  --muted: #5f6f7a;
-  --brand: #0a6774;
-  --brand-2: #28754c;
+  --panel-soft: #f2f2f2;
+  --ink: #0f0f0f;
+  --muted: #606060;
+  --brand: #ff0033;
+  --brand-2: #065fd4;
   --warn: #a86500;
-  --danger: #a33a3a;
-  --line: #d7e0e5;
-  --line-strong: #b8c6ce;
+  --danger: #c00;
+  --line: #e5e5e5;
+  --line-strong: #d3d3d3;
 }
 
 html, body, [class*="css"] {
@@ -101,12 +116,12 @@ html, body, [class*="css"] {
 }
 
 [data-testid="stSidebar"] {
-  background: #111a22;
-  border-right: 1px solid #25323c;
+  background: #ffffff;
+  border-right: 1px solid #e5e5e5;
 }
 
 [data-testid="stSidebar"] * {
-  color: #edf4f7;
+  color: #0f0f0f;
 }
 
 [data-testid="stSidebar"] input,
@@ -119,12 +134,12 @@ html, body, [class*="css"] {
 }
 
 [data-testid="stSidebar"] [role="radiogroup"] * {
-  color: #edf4f7 !important;
+  color: #0f0f0f !important;
 }
 
 [data-testid="stSidebar"] .stCaption,
 [data-testid="stSidebar"] small {
-  color: #aebbc3 !important;
+  color: #606060 !important;
 }
 
 h1, h2, h3, h4 {
@@ -200,14 +215,15 @@ input, textarea, [data-baseweb="select"] > div {
   align-items: flex-end;
   justify-content: space-between;
   gap: 1rem;
-  padding: .15rem 0 .85rem 0;
+  padding: .2rem 0 .75rem 0;
   margin-bottom: .35rem;
   border-bottom: 1px solid var(--line);
+  background: #fff;
 }
 
 .portal-header h1 {
   margin: 0;
-  font-size: 1.75rem;
+  font-size: 1.55rem;
   line-height: 1.1;
   color: var(--ink);
 }
@@ -315,6 +331,219 @@ input, textarea, [data-baseweb="select"] > div {
   background: #fcecec;
 }
 
+.run-monitor-shell {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background:
+    linear-gradient(135deg, rgba(255, 0, 51, .055), transparent 36%),
+    linear-gradient(180deg, #ffffff 0%, #fafafa 100%);
+  padding: 1rem;
+  margin: .55rem 0 1rem 0;
+  box-shadow: 0 8px 22px rgba(15, 15, 15, .055);
+}
+
+.run-monitor-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: .9rem;
+}
+
+.run-monitor-kicker {
+  color: var(--muted);
+  font-size: .78rem;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.run-monitor-title {
+  margin: .1rem 0 0 0;
+  font-family: "Space Grotesk", sans-serif;
+  font-size: 1.2rem;
+  font-weight: 800;
+}
+
+.run-live-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: .38rem;
+  border: 1px solid #f1b8c3;
+  border-radius: 999px;
+  background: #fff5f7;
+  color: #a10024;
+  padding: .28rem .62rem;
+  font-size: .78rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.run-live-dot {
+  width: .48rem;
+  height: .48rem;
+  border-radius: 999px;
+  background: var(--brand);
+  box-shadow: 0 0 0 5px rgba(255, 0, 51, .12);
+}
+
+.run-stage-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  gap: .55rem;
+  margin: .8rem 0 1rem 0;
+}
+
+.run-stage-card {
+  position: relative;
+  min-height: 104px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+  padding: .72rem .72rem .68rem .72rem;
+  overflow: hidden;
+}
+
+.run-stage-card::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 4px;
+  background: #d9d9d9;
+}
+
+.run-stage-card.done::before {
+  background: #178a4d;
+}
+
+.run-stage-card.active {
+  border-color: #111;
+  box-shadow: 0 8px 18px rgba(15, 15, 15, .08);
+}
+
+.run-stage-card.active::before {
+  background: var(--brand);
+}
+
+.run-stage-card.fail::before {
+  background: #c00;
+}
+
+.run-stage-label {
+  margin: 0;
+  font-family: "Space Grotesk", sans-serif;
+  font-size: .94rem;
+  font-weight: 800;
+  color: var(--ink);
+}
+
+.run-stage-state {
+  margin: .2rem 0 .42rem 0;
+  color: var(--muted);
+  font-size: .78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+
+.run-stage-card.done .run-stage-state {
+  color: #178a4d;
+}
+
+.run-stage-card.active .run-stage-state {
+  color: #a10024;
+}
+
+.run-stage-desc {
+  margin: 0;
+  color: var(--muted);
+  font-size: .82rem;
+  line-height: 1.25;
+}
+
+.run-meter-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) minmax(180px, 1.8fr) auto;
+  align-items: center;
+  gap: .75rem;
+  padding: .55rem .68rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  margin-top: .48rem;
+}
+
+.run-meter-label {
+  color: var(--muted);
+  font-size: .82rem;
+  font-weight: 800;
+}
+
+.run-meter-track {
+  height: .52rem;
+  border-radius: 999px;
+  background: #ececec;
+  overflow: hidden;
+}
+
+.run-meter-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--brand), #111);
+}
+
+.run-meter-value {
+  color: var(--ink);
+  font-size: .86rem;
+  font-weight: 800;
+  text-align: right;
+}
+
+.run-signal-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(178px, 1fr));
+  gap: .5rem;
+  margin: .75rem 0 0 0;
+}
+
+.run-signal-chip {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  padding: .55rem .65rem;
+}
+
+.run-signal-chip b {
+  display: block;
+  color: var(--ink);
+  font-size: .93rem;
+}
+
+.run-signal-chip span {
+  color: var(--muted);
+  font-size: .78rem;
+}
+
+.run-log-strip {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #111;
+  color: #f5f5f5;
+  padding: .65rem .75rem;
+  margin-top: .75rem;
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: .78rem;
+  line-height: 1.35;
+  max-height: 190px;
+  overflow: auto;
+}
+
+.run-log-strip div {
+  white-space: nowrap;
+}
+
 .studio-card {
   border: 1px solid var(--line);
   background: var(--panel);
@@ -388,8 +617,164 @@ input, textarea, [data-baseweb="select"] > div {
 
 .share-link-row a:hover {
   border-color: var(--brand);
-  background: #eef8fb;
+  background: #fff0f3;
   text-decoration: none;
+}
+
+.yt-studio-topbar {
+  display: flex;
+  align-items: center;
+  gap: .8rem;
+  padding: .55rem .2rem .8rem .2rem;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: .85rem;
+}
+
+.yt-brand-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: .45rem;
+  font-weight: 800;
+  font-family: "Space Grotesk", sans-serif;
+  font-size: 1.1rem;
+}
+
+.yt-brand-play {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 1.35rem;
+  border-radius: .42rem;
+  background: var(--brand);
+  color: #fff;
+  font-size: .76rem;
+}
+
+.yt-search-pill {
+  flex: 1;
+  max-width: 560px;
+  min-height: 2.35rem;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 .95rem;
+  border-radius: 999px;
+  background: #f1f1f1;
+  color: var(--muted);
+}
+
+.yt-editor-shell {
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: #fff;
+  margin: .35rem 0 1rem 0;
+}
+
+.yt-panel-title {
+  margin: 0 0 .3rem 0;
+  font-size: 1.04rem;
+  font-weight: 800;
+}
+
+.yt-section-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 3.35rem;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink);
+}
+
+.yt-section-row span {
+  color: var(--muted);
+  font-size: .9rem;
+}
+
+.yt-plus {
+  font-size: 1.45rem;
+  color: var(--ink);
+}
+
+.yt-timeline {
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: #fff;
+  padding: .7rem 0;
+  margin-top: .8rem;
+}
+
+.yt-time-ruler {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: .5rem;
+  color: var(--muted);
+  font-size: .8rem;
+  padding: 0 .65rem .45rem .65rem;
+}
+
+.yt-waveform {
+  height: 2.15rem;
+  margin: 0 .65rem .4rem .65rem;
+  border-left: 1px solid #cfcfcf;
+  border-right: 1px solid #cfcfcf;
+  background:
+    linear-gradient(90deg, rgba(0,0,0,.04) 1px, transparent 1px) 0 0 / 48px 100%,
+    repeating-linear-gradient(90deg, #d6d6d6 0 5px, #efefef 5px 10px);
+  opacity: .95;
+}
+
+.yt-thumbstrip {
+  height: 2.55rem;
+  margin: 0 .65rem;
+  border: 1px solid #b7d3f5;
+  background:
+    repeating-linear-gradient(90deg, #89a86f 0 56px, #c6bd83 56px 112px, #7fa2c4 112px 168px);
+}
+
+.yt-waveform-real {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  height: 2.35rem;
+  margin: 0 .65rem .42rem .65rem;
+  padding: 0 .35rem;
+  border-left: 1px solid #cfcfcf;
+  border-right: 1px solid #cfcfcf;
+  background: #fafafa;
+  overflow: hidden;
+}
+
+.yt-wavebar {
+  flex: 1 1 0;
+  min-width: 2px;
+  background: #c7c7c7;
+  border-radius: 2px;
+}
+
+.yt-thumbstrip-real {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  min-height: 3.25rem;
+  margin: 0 .65rem;
+  border: 1px solid #b7d3f5;
+  background: #f7fbff;
+  overflow-x: auto;
+}
+
+.yt-thumbstrip-real img {
+  display: block;
+  height: 3.25rem;
+  width: auto;
+  object-fit: cover;
+}
+
+.audio-edit-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: .75rem .85rem;
+  background: #fff;
+  margin-bottom: .55rem;
 }
 
 @media (max-width: 900px) {
@@ -423,6 +808,7 @@ def api_request(
     tenant_id: str,
     token: str,
     json_body: Optional[Dict[str, Any]] = None,
+    data: Optional[Dict[str, Any]] = None,
     files: Optional[Dict[str, Any]] = None,
     timeout: int = 180,
 ) -> Dict[str, Any]:
@@ -436,6 +822,7 @@ def api_request(
             url=url,
             headers=headers,
             json=json_body,
+            data=data,
             files=files,
             timeout=timeout,
         )
@@ -472,6 +859,31 @@ def list_match_jobs(api_base: str, tenant_id: str, token: str, match_id: str, li
     return list(payload.get("items", []))
 
 
+def get_match_timeline(
+    api_base: str,
+    tenant_id: str,
+    token: str,
+    match_id: str,
+    thumbnail_count: int = 18,
+    waveform_bins: int = 120,
+) -> Dict[str, Any]:
+    result = api_request(
+        "GET",
+        api_base,
+        f"/matches/{match_id}/timeline?thumbnail_count={thumbnail_count}&waveform_bins={waveform_bins}",
+        tenant_id,
+        token,
+        timeout=240,
+    )
+    if not result["ok"]:
+        return {"ok": False, "error": result.get("payload"), "thumbnails": [], "waveform": {"peaks": []}, "video": {}}
+    payload = result["payload"] or {}
+    if isinstance(payload, dict):
+        payload["ok"] = True
+        return payload
+    return {"ok": False, "error": str(payload), "thumbnails": [], "waveform": {"peaks": []}, "video": {}}
+
+
 def list_training_models(api_base: str, tenant_id: str, token: str) -> List[Dict[str, Any]]:
     result = api_request("GET", api_base, "/training/models", tenant_id, token)
     if not result["ok"]:
@@ -480,12 +892,29 @@ def list_training_models(api_base: str, tenant_id: str, token: str) -> List[Dict
     return list(payload)
 
 
+def create_training_run(api_base: str, tenant_id: str, token: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    return api_request("POST", api_base, "/training/runs", tenant_id, token, json_body=payload, timeout=60)
+
+
+def get_training_run(api_base: str, tenant_id: str, token: str, run_id: str) -> Dict[str, Any]:
+    result = api_request("GET", api_base, f"/training/runs/{run_id}", tenant_id, token, timeout=30)
+    return result["payload"] if result["ok"] and isinstance(result["payload"], dict) else {}
+
+
 def get_gpu_health(api_base: str, tenant_id: str, token: str) -> Dict[str, Any]:
     result = api_request("GET", api_base, "/health/gpu", tenant_id, token, timeout=15)
     if not result["ok"]:
         return {"ready": False, "error": result.get("payload"), "torch": {}, "nvidia_smi": {}, "ffmpeg_nvenc": {}}
     payload = result["payload"] or {}
     return dict(payload) if isinstance(payload, dict) else {"ready": False, "error": payload}
+
+
+def get_agent_status(api_base: str, tenant_id: str, token: str) -> Dict[str, Any]:
+    result = api_request("GET", api_base, "/agent/status", tenant_id, token, timeout=15)
+    if not result["ok"]:
+        return {"configured": False, "reachable": False, "provider": "unknown", "message": str(result.get("payload"))}
+    payload = result["payload"] or {}
+    return dict(payload) if isinstance(payload, dict) else {"configured": False, "reachable": False, "message": str(payload)}
 
 
 def inspect_local_video(api_base: str, tenant_id: str, token: str, path: str) -> Dict[str, Any]:
@@ -705,6 +1134,54 @@ def _resolve_match_video_source(match: Dict[str, Any]) -> str:
     if assets:
         return str(assets[0].get("path") or "").strip()
     return ""
+
+
+def _render_timeline_media(timeline: Dict[str, Any]) -> None:
+    video = timeline.get("video", {}) if isinstance(timeline.get("video"), dict) else {}
+    duration = float(video.get("duration_seconds") or 0.0)
+    ruler_points = [0.0]
+    if duration > 0:
+        ruler_points = [duration * (idx / 4.0) for idx in range(5)]
+    ruler_html = "".join(f"<span>{_seconds_to_clock(point)}</span>" for point in ruler_points)
+
+    waveform = timeline.get("waveform", {}) if isinstance(timeline.get("waveform"), dict) else {}
+    peaks = [float(item or 0.0) for item in list(waveform.get("peaks", []) or [])[:240]]
+    if peaks:
+        bars = "".join(
+            f'<div class="yt-wavebar" style="height:{max(8.0, min(100.0, peak * 100.0)):.1f}%"></div>'
+            for peak in peaks
+        )
+        waveform_html = f'<div class="yt-waveform-real">{bars}</div>'
+    else:
+        waveform_html = '<div class="yt-waveform"></div>'
+
+    thumbs = [
+        item
+        for item in list(timeline.get("thumbnails", []) or [])
+        if isinstance(item, dict) and str(item.get("data_url") or "").startswith("data:image/")
+    ]
+    if thumbs:
+        thumb_html = "".join(
+            f'<img src="{_h(item.get("data_url"))}" alt="{_seconds_to_clock(float(item.get("t", 0.0)))}" />'
+            for item in thumbs
+        )
+        strip_html = f'<div class="yt-thumbstrip-real">{thumb_html}</div>'
+    else:
+        strip_html = '<div class="yt-thumbstrip"></div>'
+
+    st.markdown(
+        f"""
+<div class="yt-timeline">
+  <div class="yt-time-ruler">{ruler_html}</div>
+  {waveform_html}
+  {strip_html}
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+    waveform_error = str(waveform.get("error") or "").strip()
+    if waveform_error and not peaks:
+        st.caption(f"Waveform unavailable: {waveform_error}")
 
 
 def _extract_first_frame_payload(video_path: str) -> Dict[str, Any]:
@@ -1128,6 +1605,11 @@ def _recommended_job_config() -> Dict[str, Any]:
         "audio_sensitivity": 2.0,
         "camera_mode": "wide",
         "zoom_factor": 1.6,
+        "yolo_model": "yolo26s.pt",
+        "tracker_config": "botsort.yaml",
+        "inference_imgsz": 960,
+        "detection_conf": 0.18,
+        "vid_stride": 1,
         "overlay": False,
         "no_audio": False,
         "require_gpu": False,
@@ -1136,17 +1618,121 @@ def _recommended_job_config() -> Dict[str, Any]:
     }
 
 
+def _option_index(options: List[Any], value: Any, default: int = 0) -> int:
+    try:
+        return options.index(value)
+    except ValueError:
+        return default
+
+
+def _bounded_float(value: Any, fallback: float, minimum: float, maximum: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = fallback
+    return min(maximum, max(minimum, parsed))
+
+
+def _render_gpu_analysis_controls(
+    context_key: str,
+    config: Optional[Dict[str, Any]] = None,
+    *,
+    expanded: bool = True,
+) -> Dict[str, Any]:
+    config = dict(config or {})
+    current_model = str(config.get("yolo_model") or "yolo26s.pt")
+    current_model_is_custom = current_model not in YOLO_MODEL_OPTIONS
+    current_tracker = str(config.get("tracker_config") or "botsort.yaml")
+    current_imgsz = int(config.get("inference_imgsz", 960) or 960)
+    if current_imgsz not in INFERENCE_IMAGE_SIZE_OPTIONS:
+        current_imgsz = 960
+    current_stride = int(config.get("vid_stride", 1) or 1)
+    if current_stride not in VID_STRIDE_OPTIONS:
+        current_stride = 1
+
+    with st.expander("GPU Analysis", expanded=expanded):
+        gpu_col1, gpu_col2 = st.columns([1.1, 0.9])
+        yolo_model = gpu_col1.selectbox(
+            "Detector",
+            YOLO_MODEL_OPTIONS,
+            index=_option_index(YOLO_MODEL_OPTIONS, current_model, default=(len(YOLO_MODEL_OPTIONS) - 1 if current_model_is_custom else 0)),
+            key=f"{context_key}_yolo_model",
+        )
+        tracker_config = gpu_col2.selectbox(
+            "Tracker",
+            TRACKER_CONFIG_OPTIONS,
+            index=_option_index(TRACKER_CONFIG_OPTIONS, current_tracker),
+            key=f"{context_key}_tracker_config",
+        )
+        gpu_col3, gpu_col4, gpu_col5 = st.columns(3)
+        inference_imgsz = int(
+            gpu_col3.select_slider(
+                "Image Size",
+                options=INFERENCE_IMAGE_SIZE_OPTIONS,
+                value=current_imgsz,
+                key=f"{context_key}_inference_imgsz",
+            )
+        )
+        detection_conf = float(
+            gpu_col4.slider(
+                "Confidence",
+                0.05,
+                0.5,
+                _bounded_float(config.get("detection_conf", 0.18), 0.18, 0.05, 0.5),
+                0.01,
+                key=f"{context_key}_detection_conf",
+            )
+        )
+        vid_stride = int(
+            gpu_col5.select_slider(
+                "Frame Stride",
+                options=VID_STRIDE_OPTIONS,
+                value=current_stride,
+                key=f"{context_key}_vid_stride",
+            )
+        )
+        st.caption(
+            "Use YOLO26s/YOLO26m with image size 960 or 1280 to put more of the analysis load on the GPU. "
+            "Frame stride 1 analyzes every frame."
+        )
+        custom_model_path = st.text_input(
+            "Custom Detector Weights",
+            value=current_model if current_model_is_custom else "",
+            placeholder=r"C:\path\to\runs\detect\train\weights\best.pt",
+            key=f"{context_key}_custom_yolo_model",
+            help="Use this for a fine-tuned Ultralytics detector. Leave blank to use the selected pretrained model.",
+        )
+
+    selected_model = str(yolo_model)
+    resolved_model = str(custom_model_path or ("yolo26s.pt" if selected_model == "Custom .pt path" else selected_model)).strip()
+    return {
+        "yolo_model": resolved_model,
+        "tracker_config": str(tracker_config),
+        "inference_imgsz": int(inference_imgsz),
+        "detection_conf": float(detection_conf),
+        "vid_stride": int(vid_stride),
+    }
+
+
 def _render_portal_header() -> None:
     st.markdown(
         """
+<div class="yt-studio-topbar">
+  <div class="yt-brand-mark"><span class="yt-brand-play">▶</span><span>Highlights Studio</span></div>
+  <div class="yt-search-pill">Search games, runs, clips, and exports</div>
+  <div class="portal-statusbar">
+    <span class="portal-chip">Create</span>
+    <span class="portal-chip">Tenant workspace</span>
+  </div>
+</div>
 <div class="portal-header">
   <div>
-    <div class="portal-kicker">Video Highlights</div>
+    <div class="portal-kicker">Channel content</div>
     <h1>Match Operations Studio</h1>
-    <p>Ingest, analysis, review, exports, and run diagnostics.</p>
+    <p>Manage source video, zoomed follow-cam clips, audio, exports, and diagnostics.</p>
   </div>
   <div class="portal-statusbar">
-    <span class="portal-chip">Tenant workspace</span>
+    <span class="portal-chip">Zoom-first editor</span>
     <span class="portal-chip">API connected on demand</span>
   </div>
 </div>
@@ -1203,6 +1789,375 @@ def _format_media_probe_summary(probe: Dict[str, Any]) -> str:
     if ffprobe and not ffprobe.get("ok") and ffprobe.get("error"):
         parts.append(f"ffprobe: {ffprobe.get('error')}")
     return " | ".join(parts)
+
+
+def _parse_iso_datetime(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone().replace(tzinfo=None)
+        return parsed
+    except Exception:
+        return None
+
+
+def _format_elapsed_since(value: Any) -> str:
+    parsed = _parse_iso_datetime(value)
+    if parsed is None:
+        return "-"
+    elapsed = max(0, int((datetime.now() - parsed).total_seconds()))
+    hours = elapsed // 3600
+    minutes = (elapsed % 3600) // 60
+    seconds = elapsed % 60
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {seconds}s"
+    return f"{seconds}s"
+
+
+def _resolve_job_output_dir(job: Dict[str, Any]) -> str:
+    config = job.get("config", {}) if isinstance(job.get("config"), dict) else {}
+    result = job.get("result", {}) if isinstance(job.get("result"), dict) else {}
+    candidates = [
+        result.get("output_dir"),
+        config.get("output_dir"),
+        os.path.join("outputs", str(job.get("job_id") or "").strip()),
+    ]
+    for raw_path in candidates:
+        path = str(raw_path or "").strip()
+        if not path:
+            continue
+        path = os.path.expandvars(os.path.expanduser(path))
+        if not os.path.isabs(path):
+            path = os.path.abspath(path)
+        if os.path.isdir(path):
+            return path
+    fallback = str(candidates[-1] or "").strip()
+    if not fallback:
+        return ""
+    fallback = os.path.expandvars(os.path.expanduser(fallback))
+    return fallback if os.path.isabs(fallback) else os.path.abspath(fallback)
+
+
+def _collect_job_artifacts(job: Dict[str, Any]) -> Dict[str, Any]:
+    output_dir = _resolve_job_output_dir(job)
+    artifacts: List[Dict[str, Any]] = []
+    file_names = set()
+    total_bytes = 0
+    if output_dir and os.path.isdir(output_dir):
+        try:
+            for name in sorted(os.listdir(output_dir)):
+                path = os.path.join(output_dir, name)
+                if not os.path.isfile(path):
+                    continue
+                try:
+                    size_bytes = os.path.getsize(path)
+                    modified_at = datetime.fromtimestamp(os.path.getmtime(path)).strftime("%H:%M:%S")
+                except OSError:
+                    size_bytes = 0
+                    modified_at = "-"
+                file_names.add(name)
+                total_bytes += int(size_bytes or 0)
+                artifacts.append(
+                    {
+                        "name": name,
+                        "size_bytes": int(size_bytes or 0),
+                        "size": _format_file_size(size_bytes),
+                        "modified_at": modified_at,
+                    }
+                )
+        except OSError:
+            pass
+    return {
+        "output_dir": output_dir,
+        "exists": bool(output_dir and os.path.isdir(output_dir)),
+        "files": artifacts,
+        "file_names": file_names,
+        "total_bytes": total_bytes,
+    }
+
+
+def _artifact_present(artifacts: Dict[str, Any], *names: str) -> bool:
+    file_names = artifacts.get("file_names", set())
+    return any(name in file_names for name in names)
+
+
+def _latest_artifact_names(artifacts: Dict[str, Any], limit: int = 4) -> str:
+    files = list(artifacts.get("files") or [])
+    if not files:
+        return "No files written yet"
+    latest = files[-limit:]
+    return ", ".join(f"{item.get('name')} ({item.get('size')})" for item in latest)
+
+
+def _runtime_signal_lines(job_id: str, limit: int = 12) -> List[str]:
+    log_paths = [
+        os.path.join("logs", "api.out.log"),
+        os.path.join("logs", "api.err.log"),
+    ]
+    signal_terms = (
+        "[1/5]",
+        "[2/5]",
+        "[3/5]",
+        "[4/5]",
+        "[5/5]",
+        "YOLO runtime",
+        "Using device",
+        "GPU:",
+        "Analysis-only mode",
+        "MoviePy",
+        "frame_index:",
+        "Wrote analysis",
+        "tracking",
+        "bookmarks",
+    )
+    normal_lines: List[str] = []
+    progress_lines: List[str] = []
+    for log_path in log_paths:
+        if not os.path.isfile(log_path):
+            continue
+        try:
+            with open(log_path, "r", encoding="utf-8", errors="ignore") as handle:
+                lines = handle.readlines()[-500:]
+        except OSError:
+            continue
+        for raw_line in lines:
+            line = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", raw_line).strip()
+            if not line:
+                continue
+            if job_id and job_id in line:
+                normal_lines.append(line)
+                continue
+            if any(term.lower() in line.lower() for term in signal_terms):
+                if line.startswith("frame_index:"):
+                    progress_lines.append(line)
+                else:
+                    normal_lines.append(line)
+    combined: List[str] = []
+    seen = set()
+    for line in normal_lines[-(limit - 2) :] + progress_lines[-2:]:
+        if line in seen:
+            continue
+        seen.add(line)
+        combined.append(line)
+    return combined[-limit:]
+
+
+def _first_gpu_snapshot(gpu_health: Dict[str, Any]) -> Dict[str, Any]:
+    nvidia_info = gpu_health.get("nvidia_smi", {}) if isinstance(gpu_health.get("nvidia_smi"), dict) else {}
+    gpus = nvidia_info.get("gpus", []) if isinstance(nvidia_info.get("gpus"), list) else []
+    if gpus and isinstance(gpus[0], dict):
+        return dict(gpus[0])
+    return {}
+
+
+def _run_stage_cards(job: Dict[str, Any], artifacts: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str]:
+    status = str(job.get("status") or "").lower()
+    config = job.get("config", {}) if isinstance(job.get("config"), dict) else {}
+    result = job.get("result", {}) if isinstance(job.get("result"), dict) else {}
+    analysis_only = bool(config.get("analysis_only", True))
+    terminal_success = status == "completed"
+    terminal_problem = status in {"failed", "canceled", "cancel_requested"}
+    has_trim = _artifact_present(artifacts, "trimmed_working_video.mp4")
+    has_tracking = _artifact_present(artifacts, "analysis_tracking.json")
+    has_bookmarks = _artifact_present(artifacts, "analysis_bookmarks.json", "analysis_bookmarks.csv")
+    clip_files = [
+        item
+        for item in list(artifacts.get("files") or [])
+        if str(item.get("name", "")).lower().endswith(".mp4")
+        and str(item.get("name", "")).lower() != "trimmed_working_video.mp4"
+    ]
+    bookmark_count = int(result.get("bookmarks_count", 0) or 0)
+
+    stage_defs = [
+        {
+            "key": "queued",
+            "label": "Queued",
+            "desc": "Run accepted by the worker queue.",
+            "done": bool(job.get("started_at")) or status in {"claimed", "running", "completed", "failed"},
+        },
+        {
+            "key": "source",
+            "label": "Source",
+            "desc": "Video path, trim window, model, and GPU requirements resolved.",
+            "done": bool(job.get("started_at")) or has_trim or terminal_success,
+        },
+        {
+            "key": "trim",
+            "label": "Trim",
+            "desc": "Working video generated for the selected test window.",
+            "done": has_trim or has_tracking or has_bookmarks or terminal_success,
+        },
+        {
+            "key": "track",
+            "label": "YOLO26 Track",
+            "desc": "CUDA detector/tracker is scanning players, ball, and motion.",
+            "done": has_tracking or has_bookmarks or terminal_success,
+        },
+        {
+            "key": "signals",
+            "label": "Signal Score",
+            "desc": "Motion, audio, and event signals are converted into review candidates.",
+            "done": has_bookmarks or terminal_success,
+        },
+        {
+            "key": "bookmarks",
+            "label": "Bookmarks",
+            "desc": "Review markers are written for the timeline and table.",
+            "done": has_bookmarks or bookmark_count > 0 or terminal_success,
+        },
+    ]
+    if analysis_only:
+        stage_defs.append(
+            {
+                "key": "finish",
+                "label": "Ready",
+                "desc": "Analysis-only run is finalized for review.",
+                "done": terminal_success,
+            }
+        )
+    else:
+        stage_defs.extend(
+            [
+                {
+                    "key": "export",
+                    "label": "Export",
+                    "desc": "Clips, overlays, and montage files are rendered.",
+                    "done": bool(clip_files) or terminal_success,
+                },
+                {
+                    "key": "finish",
+                    "label": "Ready",
+                    "desc": "Rendered output is finalized.",
+                    "done": terminal_success,
+                },
+            ]
+        )
+
+    active_index = 0
+    for idx, stage in enumerate(stage_defs):
+        if not stage["done"]:
+            active_index = idx
+            break
+    else:
+        active_index = len(stage_defs) - 1
+
+    active_label = str(stage_defs[active_index]["label"])
+    for idx, stage in enumerate(stage_defs):
+        if stage["done"]:
+            stage["state"] = "done"
+            stage["state_label"] = "Confirmed"
+        elif terminal_problem and idx == active_index:
+            stage["state"] = "fail"
+            stage["state_label"] = status.replace("_", " ").title()
+        elif idx == active_index and status in {"queued", "claimed", "running", "cancel_requested"}:
+            stage["state"] = "active"
+            stage["state_label"] = "Running Now" if status != "queued" else "Waiting"
+        else:
+            stage["state"] = "pending"
+            stage["state_label"] = "Waiting"
+    return stage_defs, active_label
+
+
+def _render_meter(label: str, value: float, detail: str) -> str:
+    clamped = max(0.0, min(100.0, float(value or 0.0)))
+    return f"""
+<div class="run-meter-row">
+  <div class="run-meter-label">{_h(label)}</div>
+  <div class="run-meter-track"><div class="run-meter-fill" style="width:{clamped:.1f}%"></div></div>
+  <div class="run-meter-value">{_h(detail)}</div>
+</div>
+"""
+
+
+def _render_realtime_job_timeline(
+    job: Dict[str, Any],
+    diagnostics: Dict[str, Any],
+    gpu_health: Dict[str, Any],
+) -> None:
+    config = job.get("config", {}) if isinstance(job.get("config"), dict) else {}
+    result = job.get("result", {}) if isinstance(job.get("result"), dict) else {}
+    status = str(job.get("status") or "-")
+    job_id = str(job.get("job_id") or "").strip()
+    artifacts = _collect_job_artifacts(job)
+    stages, active_label = _run_stage_cards(job, artifacts)
+    gpu = _first_gpu_snapshot(gpu_health)
+    gpu_util = float(gpu.get("utilization_gpu_percent", 0) or 0)
+    memory_used = float(gpu.get("memory_used_mb", 0) or 0)
+    memory_total = float(gpu.get("memory_total_mb", 0) or 0)
+    memory_pct = (memory_used / memory_total * 100.0) if memory_total > 0 else 0.0
+    db_progress = max(0.0, min(100.0, float(job.get("progress", 0.0) or 0.0) * 100.0))
+    confirmed_count = sum(1 for stage in stages if stage.get("state") == "done")
+    milestone_pct = (confirmed_count / max(1, len(stages))) * 100.0
+    detector = str(config.get("yolo_model") or config.get("model_version") or "-")
+    tracker = str(config.get("tracker_config") or "-")
+    imgsz = str(config.get("inference_imgsz") or "-")
+    conf = str(config.get("detection_conf") or "-")
+    stride = str(config.get("vid_stride") or "-")
+    elapsed = _format_elapsed_since(job.get("started_at") or job.get("created_at"))
+    bookmark_count = int(result.get("bookmarks_count", 0) or 0)
+    source_summary = _latest_artifact_names(artifacts)
+    live_text = "LIVE" if status.lower() in {"queued", "claimed", "running", "cancel_requested"} else status.upper()
+
+    cards_html = "".join(
+        f"""
+<div class="run-stage-card {_h(stage.get('state'))}">
+  <p class="run-stage-label">{_h(stage.get('label'))}</p>
+  <p class="run-stage-state">{_h(stage.get('state_label'))}</p>
+  <p class="run-stage-desc">{_h(stage.get('desc'))}</p>
+</div>
+"""
+        for stage in stages
+    )
+    meters_html = "".join(
+        [
+            _render_meter("GPU Load", gpu_util, f"{gpu_util:.0f}%"),
+            _render_meter(
+                "VRAM",
+                memory_pct,
+                f"{memory_used / 1024.0:.1f}/{memory_total / 1024.0:.1f} GB" if memory_total else "not reported",
+            ),
+            _render_meter("DB Progress", db_progress, f"{db_progress:.0f}% stored"),
+            _render_meter("Confirmed Milestones", milestone_pct, f"{confirmed_count}/{len(stages)} stages"),
+        ]
+    )
+    signal_html = f"""
+<div class="run-signal-strip">
+  <div class="run-signal-chip"><b>{_h(active_label)}</b><span>current inferred stage</span></div>
+  <div class="run-signal-chip"><b>{_h(detector)}</b><span>{_h(tracker)} | imgsz {_h(imgsz)} | conf {_h(conf)} | stride {_h(stride)}</span></div>
+  <div class="run-signal-chip"><b>{_h(elapsed)}</b><span>elapsed since worker start</span></div>
+  <div class="run-signal-chip"><b>{_h(bookmark_count)}</b><span>bookmarks written so far</span></div>
+  <div class="run-signal-chip"><b>{_h(_format_file_size(artifacts.get('total_bytes', 0)))}</b><span>{_h(source_summary)}</span></div>
+</div>
+"""
+    log_lines = _runtime_signal_lines(job_id)
+    logs_html = ""
+    if log_lines:
+        logs_html = "<div class=\"run-log-strip\">" + "".join(f"<div>{_h(line)}</div>" for line in log_lines) + "</div>"
+
+    diag_summary = str(diagnostics.get("summary") or "").strip()
+    st.markdown(
+        f"""
+<div class="run-monitor-shell">
+  <div class="run-monitor-header">
+    <div>
+      <div class="run-monitor-kicker">Realtime Run Timeline</div>
+      <div class="run-monitor-title">{_h(active_label)} · { _h(status.replace('_', ' ').title()) }</div>
+      <div class="studio-muted">{_h(diag_summary or 'Monitoring job state, artifacts, and GPU telemetry.')}</div>
+    </div>
+    <div class="run-live-badge"><span class="run-live-dot"></span>{_h(live_text)}</div>
+  </div>
+  <div class="run-stage-grid">{cards_html}</div>
+  {meters_html}
+  {signal_html}
+  {logs_html}
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
 
 def _local_video_probe(path: str) -> Dict[str, Any]:
@@ -1424,6 +2379,9 @@ def _apply_url_state_to_session() -> None:
         "studio": "Portal Home",
         "upload": "New Processing Run",
         "library": "Game Library",
+        "training": "Training Lab",
+        "training_lab": "Training Lab",
+        "training-lab": "Training Lab",
         "monitor": "Operations Console",
         "operations": "Operations Console",
         "run_monitor": "Operations Console",
@@ -1440,6 +2398,7 @@ def _apply_url_state_to_session() -> None:
             user_nav_aliases = {
                 "Portal Home": "Studio",
                 "New Processing Run": "Upload",
+                "Training Lab": "Training",
                 "Operations Console": "Run Monitor",
             }
             st.session_state.portal_user_nav_main = user_nav_aliases.get(target_nav, "Studio")
@@ -1480,6 +2439,8 @@ def _view_code_from_nav(nav_key: str, is_technical: bool) -> str:
         return "upload"
     if nav_key == "Game Library":
         return "library"
+    if nav_key == "Training Lab":
+        return "training"
     if nav_key == "Operations Console":
         return "monitor"
     return "home" if is_technical else "studio"
@@ -1886,6 +2847,362 @@ def _render_match_bookmark_review(
         safe_rerun()
 
 
+def _render_studio_editor(
+    *,
+    api_base: str,
+    tenant_id: str,
+    token: str,
+    selected_match: Dict[str, Any],
+    selected_match_id: str,
+    jobs: List[Dict[str, Any]],
+    source_video: str,
+    monitor_nav_label: str,
+) -> None:
+    latest_job = _latest_job(jobs)
+    latest_config = dict((latest_job or {}).get("config", {}) or _recommended_job_config())
+    if str(latest_config.get("camera_mode", "wide")) == "wide":
+        latest_config["camera_mode"] = "follow_action"
+    latest_config.setdefault("zoom_factor", 1.8)
+    latest_config.setdefault("analysis_only", False)
+
+    st.markdown('<div class="yt-editor-shell">', unsafe_allow_html=True)
+    editor_col, preview_col = st.columns([1.0, 1.35])
+    with editor_col:
+        st.markdown('<p class="yt-panel-title">Video editor</p>', unsafe_allow_html=True)
+        st.markdown(
+            """
+<div class="yt-section-row"><div>Zoom & follow-cam<br><span>Center the selected player or action</span></div><div class="yt-plus">+</div></div>
+<div class="yt-section-row"><div>Player lock<br><span>Use first frame ROI to choose the target</span></div><div class="yt-plus">+</div></div>
+<div class="yt-section-row"><div>Audio<br><span>Clean, remove, replace, or mix</span></div><div class="yt-plus">+</div></div>
+<div class="yt-section-row"><div>Clips<br><span>Export bookmarked moments</span></div><div class="yt-plus">+</div></div>
+""",
+            unsafe_allow_html=True,
+        )
+
+        cam_col1, cam_col2 = st.columns([1.0, 1.0])
+        camera_options = ["follow_action", "follow_player", "wide"]
+        current_camera = str(latest_config.get("camera_mode") or "follow_action")
+        if current_camera not in camera_options:
+            current_camera = "follow_action"
+        camera_mode = cam_col1.selectbox(
+            "Camera",
+            camera_options,
+            index=camera_options.index(current_camera),
+            key=f"studio_editor_camera_{selected_match_id}",
+        )
+        zoom_factor = cam_col2.slider(
+            "Zoom",
+            1.0,
+            3.0,
+            min(3.0, max(1.0, float(latest_config.get("zoom_factor", 1.8) or 1.8))),
+            0.1,
+            key=f"studio_editor_zoom_{selected_match_id}",
+        )
+        st.caption("Zoom presets to try: 1.4x wide context, 1.8x balanced, 2.2x player focus, 2.6x tight clips.")
+
+        gpu_settings = _render_gpu_analysis_controls(
+            context_key=f"studio_editor_{selected_match_id}",
+            config=latest_config,
+            expanded=True,
+        )
+
+        trim_window = _render_trim_window_controls(
+            context_key=f"studio_editor_{selected_match_id}",
+            config=latest_config,
+            default_enabled=False,
+            default_duration_minutes=3.0,
+        )
+        analysis_only = st.checkbox(
+            "Analysis only",
+            value=bool(latest_config.get("analysis_only", False)),
+            key=f"studio_editor_analysis_only_{selected_match_id}",
+        )
+
+        with st.expander("Player Lock", expanded=True):
+            player_roi_payload = _render_player_roi_selector(
+                context_key=f"studio_editor_{selected_match_id}",
+                default_enabled=bool(latest_config.get("player_roi")),
+                existing_roi=(latest_config.get("player_roi") if isinstance(latest_config.get("player_roi"), dict) else None),
+                source_video_path=source_video or "",
+            )
+
+        if st.button(
+            "Reprocess With Zoom Settings",
+            type="primary",
+            use_container_width=True,
+            key=f"studio_editor_reprocess_{selected_match_id}",
+            disabled=not bool(source_video),
+        ):
+            if player_roi_payload.get("enabled") and not player_roi_payload.get("roi"):
+                st.error("Player lock is enabled, but the first-frame selector is not ready.")
+            else:
+                next_config = dict(latest_config)
+                next_config.update(
+                    {
+                        "camera_mode": str(camera_mode),
+                        "zoom_factor": float(zoom_factor),
+                        "analysis_only": bool(analysis_only),
+                        **gpu_settings,
+                        "run_created_at": datetime.utcnow().isoformat(),
+                        "run_created_from": "studio_youtube_editor",
+                        "test_window_enabled": bool(trim_window["enabled"]),
+                    }
+                )
+                if trim_window["enabled"]:
+                    next_config["trim_start"] = float(trim_window["trim_start"])
+                    next_config["trim_end"] = float(trim_window["trim_end"])
+                else:
+                    next_config.pop("trim_start", None)
+                    next_config.pop("trim_end", None)
+                if player_roi_payload.get("roi"):
+                    next_config["player_roi"] = dict(player_roi_payload["roi"])
+                elif "player_roi" in next_config:
+                    next_config.pop("player_roi", None)
+
+                create_result = api_request(
+                    "POST",
+                    api_base,
+                    f"/matches/{selected_match_id}/jobs",
+                    tenant_id,
+                    token,
+                    json_body={"config": next_config},
+                )
+                if not create_result["ok"]:
+                    st.error(f"Failed to queue zoom reprocess: {create_result['payload']}")
+                else:
+                    new_job_id = str(create_result["payload"]["job_id"])
+                    st.session_state.selected_job_id = new_job_id
+                    st.session_state.portal_pending_job_select_id = new_job_id
+                    st.session_state.portal_pending_workspace_view = "Live"
+                    st.session_state.portal_pending_nav = monitor_nav_label
+                    st.session_state.portal_flash_message = f"Zoom reprocess queued. job_id={new_job_id}"
+                    safe_rerun()
+
+    with preview_col:
+        st.markdown('<p class="yt-panel-title">Preview</p>', unsafe_allow_html=True)
+        if source_video:
+            seek_seconds = st.number_input(
+                "Timeline position",
+                min_value=0,
+                value=int(st.session_state.portal_video_seek_s or 0),
+                step=1,
+                key=f"studio_editor_seek_{selected_match_id}",
+            )
+            st.session_state.portal_video_seek_s = int(seek_seconds)
+            st.video(source_video, start_time=int(seek_seconds))
+        else:
+            st.warning("This match has no playable source video.")
+
+        stat_col1, stat_col2, stat_col3 = st.columns(3)
+        stat_col1.metric("Camera", str(camera_mode))
+        stat_col2.metric("Zoom", f"{float(zoom_factor):.1f}x")
+        stat_col3.metric("Window", trim_window["label"])
+
+    st.markdown("</div>", unsafe_allow_html=True)
+    timeline_key = f"studio_timeline_{selected_match_id}"
+    timeline_col1, timeline_col2 = st.columns([1.0, 3.0])
+    refresh_timeline = timeline_col1.button(
+        "Refresh Timeline Media",
+        key=f"studio_timeline_refresh_{selected_match_id}",
+        use_container_width=True,
+        disabled=not bool(source_video),
+    )
+    if source_video and (refresh_timeline or timeline_key not in st.session_state):
+        with st.spinner("Building timeline thumbnails and waveform..."):
+            st.session_state[timeline_key] = get_match_timeline(
+                api_base=api_base,
+                tenant_id=tenant_id,
+                token=token,
+                match_id=selected_match_id,
+                thumbnail_count=20,
+                waveform_bins=140,
+            )
+    timeline = st.session_state.get(timeline_key, {})
+    if isinstance(timeline, dict) and timeline.get("ok"):
+        video_meta = timeline.get("video", {}) if isinstance(timeline.get("video"), dict) else {}
+        timeline_col2.caption(
+            f"Timeline media: `{_seconds_to_clock(float(video_meta.get('duration_seconds') or 0.0))}` | "
+            f"`{video_meta.get('width') or '-'}x{video_meta.get('height') or '-'}` | "
+            f"{len(list(timeline.get('thumbnails', []) or []))} thumbnails"
+        )
+        _render_timeline_media(timeline)
+    else:
+        if isinstance(timeline, dict) and timeline.get("error"):
+            timeline_col2.warning(f"Timeline media unavailable: {timeline.get('error')}")
+        _render_timeline_media({"video": {"duration_seconds": 0.0}, "thumbnails": [], "waveform": {"peaks": []}})
+
+
+def _render_studio_audio(
+    *,
+    api_base: str,
+    tenant_id: str,
+    token: str,
+    selected_match: Dict[str, Any],
+    selected_match_id: str,
+    source_video: str,
+) -> None:
+    st.subheader("Audio")
+    metadata = selected_match.get("metadata", {}) if isinstance(selected_match.get("metadata"), dict) else {}
+    audio_edits = list(metadata.get("audio_edits", []) or [])
+
+    controls_col, preview_col = st.columns([1.0, 1.2])
+    with controls_col:
+        st.markdown('<div class="audio-edit-card">', unsafe_allow_html=True)
+        mode_labels = {
+            "Clean original audio": "keep",
+            "Remove all audio": "remove",
+            "Replace with MP3": "replace",
+            "Mix MP3 under original": "mix",
+        }
+        selected_mode_label = st.selectbox(
+            "Audio operation",
+            list(mode_labels.keys()),
+            key=f"studio_audio_mode_{selected_match_id}",
+        )
+        mode = mode_labels[selected_mode_label]
+
+        cleanup_labels = {
+            "None": "none",
+            "Stadium clean": "stadium_clean",
+            "Reduce wind noise": "wind_reduce",
+            "Reduce conversations": "speech_reduce",
+            "AI RNNoise model": "ai_rnnoise",
+        }
+        cleanup_label = st.selectbox(
+            "Cleanup",
+            list(cleanup_labels.keys()),
+            index=0 if mode in {"replace", "remove"} else 2,
+            disabled=mode in {"replace", "remove"},
+            key=f"studio_audio_cleanup_{selected_match_id}",
+        )
+        cleanup_profile = "none" if mode in {"replace", "remove"} else cleanup_labels[cleanup_label]
+
+        original_volume = st.slider(
+            "Original volume",
+            0.0,
+            2.0,
+            1.0,
+            0.05,
+            disabled=mode in {"replace", "remove"},
+            key=f"studio_audio_original_volume_{selected_match_id}",
+        )
+        music_volume = st.slider(
+            "MP3 volume",
+            0.0,
+            2.0,
+            0.35 if mode == "mix" else 1.0,
+            0.05,
+            disabled=mode not in {"replace", "mix"},
+            key=f"studio_audio_music_volume_{selected_match_id}",
+        )
+        uploaded_audio = st.file_uploader(
+            "MP3 / audio file",
+            type=["mp3", "wav", "m4a", "aac"],
+            disabled=mode not in {"replace", "mix"},
+            key=f"studio_audio_upload_{selected_match_id}",
+        )
+        loop_external_audio = st.checkbox(
+            "Loop MP3 to match video length",
+            value=True,
+            disabled=mode not in {"replace", "mix"},
+            key=f"studio_audio_loop_{selected_match_id}",
+        )
+        title = st.text_input(
+            "Output title",
+            value=f"{selected_match.get('name') or selected_match_id} audio edit",
+            key=f"studio_audio_title_{selected_match_id}",
+        )
+
+        render_disabled = not bool(source_video) or (mode in {"replace", "mix"} and uploaded_audio is None)
+        if st.button(
+            "Render Audio Edit",
+            type="primary",
+            use_container_width=True,
+            disabled=render_disabled,
+            key=f"studio_audio_render_{selected_match_id}",
+        ):
+            files = None
+            if uploaded_audio is not None:
+                files = {
+                    "audio_file": (
+                        uploaded_audio.name,
+                        uploaded_audio.getvalue(),
+                        uploaded_audio.type or "audio/mpeg",
+                    )
+                }
+            result = api_request(
+                "POST",
+                api_base,
+                f"/matches/{selected_match_id}/audio/render",
+                tenant_id,
+                token,
+                data={
+                    "mode": mode,
+                    "cleanup_profile": cleanup_profile,
+                    "original_volume": str(float(original_volume)),
+                    "music_volume": str(float(music_volume)),
+                    "loop_external_audio": str(bool(loop_external_audio)).lower(),
+                    "title": title.strip() or "Audio Edit",
+                    "expires_seconds": "3600",
+                },
+                files=files,
+                timeout=900,
+            )
+            if not result["ok"]:
+                st.error(f"Audio render failed: {result['payload']}")
+            else:
+                payload = result["payload"]
+                playback = _resolve_clip_playback_source(
+                    path=str(payload.get("path") or ""),
+                    download_url=str(payload.get("download_url") or ""),
+                )
+                st.session_state.portal_audio_edit_source = playback
+                st.session_state.portal_audio_edit_summary = payload
+                st.success("Audio edit rendered.")
+        if mode in {"replace", "mix"} and uploaded_audio is None:
+            st.caption("Upload an MP3 or audio file to enable this render.")
+        if cleanup_profile == "ai_rnnoise":
+            st.caption("AI cleanup uses ffmpeg arnndn and requires `VH_RNNOISE_MODEL_PATH` on the API server.")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with preview_col:
+        st.markdown('<p class="yt-panel-title">Preview</p>', unsafe_allow_html=True)
+        preview_source = str(st.session_state.get("portal_audio_edit_source", "") or "") or source_video
+        if preview_source:
+            st.video(preview_source)
+        else:
+            st.warning("This match has no playable source video.")
+
+        if st.session_state.get("portal_audio_edit_summary"):
+            st.caption("Latest audio render")
+            st.json(st.session_state.portal_audio_edit_summary)
+
+        if audio_edits:
+            rows = [
+                {
+                    "title": item.get("title") or "Audio Edit",
+                    "mode": item.get("mode"),
+                    "cleanup": item.get("cleanup_profile"),
+                    "created_at": _iso_to_short(item.get("created_at")),
+                    "path": item.get("path"),
+                }
+                for item in sorted(audio_edits, key=lambda entry: str(entry.get("created_at") or ""), reverse=True)
+            ]
+            st.dataframe(rows, use_container_width=True, hide_index=True)
+            options = {
+                f"{row['title']} | {row['mode']} | {row['created_at']}": row["path"]
+                for row in rows
+                if row.get("path")
+            }
+            if options:
+                selected_audio = st.selectbox(
+                    "Open Audio Edit",
+                    list(options.keys()),
+                    key=f"studio_audio_history_{selected_match_id}",
+                )
+                st.video(str(options[selected_audio]))
+
+
 def _render_match_assistant(
     *,
     api_base: str,
@@ -1894,7 +3211,26 @@ def _render_match_assistant(
     selected_match_id: str,
 ) -> None:
     st.subheader("Match Assistant")
-    st.caption("Use the configured LLM provider to summarize the match or explain a selected detected event.")
+    agent_status = get_agent_status(api_base, tenant_id, token)
+    status_col1, status_col2, status_col3 = st.columns(3)
+    status_col1.metric("Provider", str(agent_status.get("provider") or "fallback"))
+    status_col2.metric("Model", str(agent_status.get("model") or "-"))
+    status_col3.metric("Reachable", "yes" if agent_status.get("reachable") is True else "no" if agent_status.get("reachable") is False else "n/a")
+    message = str(agent_status.get("message") or "").strip()
+    if message:
+        st.caption(message)
+    with st.expander("Local AI setup", expanded=not bool(agent_status.get("configured"))):
+        st.code(
+            "\n".join(
+                [
+                    "$env:VH_LLM_PROVIDER='ollama'",
+                    "$env:VH_LLM_MODEL='gemma4:e2b'",
+                    "$env:VH_LLM_BASE_URL='http://127.0.0.1:11434'",
+                    "python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000",
+                ]
+            ),
+            language="powershell",
+        )
 
     query_key = f"assistant_query_{selected_match_id}"
     if query_key not in st.session_state:
@@ -2023,6 +3359,10 @@ if "portal_export_video_source" not in st.session_state:
     st.session_state.portal_export_video_source = ""
 if "portal_export_summary" not in st.session_state:
     st.session_state.portal_export_summary = {}
+if "portal_audio_edit_source" not in st.session_state:
+    st.session_state.portal_audio_edit_source = ""
+if "portal_audio_edit_summary" not in st.session_state:
+    st.session_state.portal_audio_edit_summary = {}
 if "portal_auto_fetch_job_id" not in st.session_state:
     st.session_state.portal_auto_fetch_job_id = ""
 if "portal_flash_message" not in st.session_state:
@@ -2094,6 +3434,7 @@ with st.sidebar:
                 "Portal Home": "Studio",
                 "New Processing Run": "Upload",
                 "Game Library": "Studio",
+                "Training Lab": "Training",
                 "Operations Console": "Run Monitor",
                 "Studio Home": "Studio",
                 "Upload & Run": "Upload",
@@ -2106,7 +3447,7 @@ with st.sidebar:
     if experience_mode == "Technical":
         nav = st.radio(
             "Portal",
-            ["Portal Home", "New Processing Run", "Game Library", "Operations Console"],
+            ["Portal Home", "New Processing Run", "Game Library", "Training Lab", "Operations Console"],
             index=0,
             key="portal_nav",
         )
@@ -2117,7 +3458,7 @@ with st.sidebar:
 
 is_technical = experience_mode == "Technical"
 if experience_mode == "User Friendly":
-    user_nav_options = ["Studio", "Upload", "Run Monitor"]
+    user_nav_options = ["Studio", "Upload", "Training", "Run Monitor"]
     if str(st.session_state.portal_user_nav_main or "") not in user_nav_options:
         st.session_state.portal_user_nav_main = "Studio"
     user_nav = st.radio(
@@ -2129,6 +3470,7 @@ if experience_mode == "User Friendly":
     nav_map = {
         "Studio": "Portal Home",
         "Upload": "New Processing Run",
+        "Training": "Training Lab",
         "Run Monitor": "Operations Console",
     }
     nav_key = nav_map.get(user_nav, "Portal Home")
@@ -2337,7 +3679,7 @@ if nav_key == "Portal Home":
                 if bool(st.session_state.portal_studio_focus_review):
                     st.session_state.portal_pending_workspace_view = "Review"
                     st.session_state.portal_studio_focus_review = False
-                workspace_options = ["Overview", "Review", "Live", "Runs", "Exports", "Assistant"]
+                workspace_options = ["Overview", "Editor", "Audio", "Review", "Live", "Runs", "Exports", "Assistant"]
                 pending_workspace_view = str(st.session_state.get("portal_pending_workspace_view", "") or "")
                 if pending_workspace_view in workspace_options:
                     st.session_state.portal_studio_workspace_view = pending_workspace_view
@@ -2370,7 +3712,7 @@ if nav_key == "Portal Home":
                     ov_col3.metric("Latest Status", str((latest_job or {}).get("status", "no_runs")))
                     ov_col4.metric("Latest Bookmarks", int((latest_job or {}).get("result", {}).get("bookmarks_count", 0) or 0))
 
-                    action_col1, action_col2, action_col3 = st.columns(3)
+                    action_col1, action_col2, action_col3, action_col4, action_col5 = st.columns(5)
                     if action_col1.button(
                         "Start New Analysis For This Match",
                         key=f"studio_workspace_start_{selected_match_id}",
@@ -2408,6 +3750,22 @@ if nav_key == "Portal Home":
                         st.session_state.portal_pending_nav = monitor_nav_label
                         safe_rerun()
                     if action_col3.button(
+                        "Open Editor",
+                        key=f"studio_workspace_editor_{selected_match_id}",
+                        use_container_width=True,
+                        disabled=not bool(source_video),
+                    ):
+                        st.session_state.portal_pending_workspace_view = "Editor"
+                        safe_rerun()
+                    if action_col4.button(
+                        "Open Audio",
+                        key=f"studio_workspace_audio_{selected_match_id}",
+                        use_container_width=True,
+                        disabled=not bool(source_video),
+                    ):
+                        st.session_state.portal_pending_workspace_view = "Audio"
+                        safe_rerun()
+                    if action_col5.button(
                         "Open Review & Bookmarks",
                         key=f"studio_workspace_review_{selected_match_id}",
                         use_container_width=True,
@@ -2443,6 +3801,28 @@ if nav_key == "Portal Home":
                                 use_container_width=True,
                                 hide_index=True,
                             )
+
+                elif workspace_view == "Editor":
+                    _render_studio_editor(
+                        api_base=api_base,
+                        tenant_id=tenant_id,
+                        token=token,
+                        selected_match=selected_match,
+                        selected_match_id=selected_match_id,
+                        jobs=jobs,
+                        source_video=source_video,
+                        monitor_nav_label=monitor_nav_label,
+                    )
+
+                elif workspace_view == "Audio":
+                    _render_studio_audio(
+                        api_base=api_base,
+                        tenant_id=tenant_id,
+                        token=token,
+                        selected_match=selected_match,
+                        selected_match_id=selected_match_id,
+                        source_video=source_video,
+                    )
 
                 elif workspace_view == "Review":
                     _render_match_bookmark_review(
@@ -2708,6 +4088,13 @@ elif nav_key == "New Processing Run":
             thread_count = 0
             camera_mode = "wide"
             zoom_factor = 1.6
+            gpu_settings = {
+                "yolo_model": "yolo26s.pt",
+                "tracker_config": "botsort.yaml",
+                "inference_imgsz": 960,
+                "detection_conf": 0.18,
+                "vid_stride": 1,
+            }
             no_audio = False
             overlay = False
             require_gpu = bool(st.session_state.get("portal_gpu_ready", False))
@@ -2824,7 +4211,7 @@ elif nav_key == "New Processing Run":
                     key="portal_new_camera_mode",
                     help="`follow_action` keeps the tracked player central while nudging toward nearby ball action.",
                 )
-                zoom_factor = out_col2.slider("Zoom Factor", 1.0, 2.5, 1.6, 0.1, key="portal_new_zoom_factor")
+                zoom_factor = out_col2.slider("Zoom Factor", 1.0, 3.0, 1.6, 0.1, key="portal_new_zoom_factor")
                 require_gpu = out_col3.checkbox(
                     "Require GPU",
                     value=bool(st.session_state.get("portal_gpu_ready", False)),
@@ -2836,6 +4223,12 @@ elif nav_key == "New Processing Run":
                 overlay = output_col2.checkbox("Generate Spotlight Overlay", value=False, key="portal_new_overlay")
 
             with advanced_tab:
+                gpu_settings = _render_gpu_analysis_controls(
+                    context_key="portal_new",
+                    config=gpu_settings,
+                    expanded=True,
+                )
+
                 with st.expander("Logging", expanded=True):
                     selected_log_profile = st.selectbox(
                         "Logging Profile",
@@ -2982,6 +4375,7 @@ elif nav_key == "New Processing Run":
                             "audio_sensitivity": float(audio_sens),
                             "camera_mode": str(camera_mode),
                             "zoom_factor": float(zoom_factor),
+                            **gpu_settings,
                             "overlay": bool(overlay),
                             "no_audio": bool(no_audio),
                             "require_gpu": bool(require_gpu),
@@ -3097,10 +4491,15 @@ elif nav_key == "New Processing Run":
                 rerun_zoom_factor = rerun_cam_col2.slider(
                     "Zoom Factor",
                     1.0,
-                    2.5,
-                    float(source_config.get("zoom_factor", 1.6)),
+                    3.0,
+                    _bounded_float(source_config.get("zoom_factor", 1.6), 1.6, 1.0, 3.0),
                     0.1,
                     key="portal_rerun_zoom_factor",
+                )
+                rerun_gpu_settings = _render_gpu_analysis_controls(
+                    context_key=f"portal_rerun_{source_job['job_id']}",
+                    config=source_config,
+                    expanded=True,
                 )
                 rerun_trim_window = _render_trim_window_controls(
                     context_key=f"portal_rerun_{source_job['job_id']}",
@@ -3129,6 +4528,7 @@ elif nav_key == "New Processing Run":
                     overrides["analysis_only"] = bool(rerun_analysis_only)
                     overrides["camera_mode"] = str(rerun_camera_mode)
                     overrides["zoom_factor"] = float(rerun_zoom_factor)
+                    overrides.update(rerun_gpu_settings)
                     overrides["log_profile"] = rerun_log_profile
                     overrides["test_window_enabled"] = bool(rerun_trim_window["enabled"])
                     overrides["trim_start"] = (
@@ -3161,6 +4561,140 @@ elif nav_key == "New Processing Run":
                         st.session_state.portal_flash_message = f"Rerun queued: {rerun_job_id}"
                         safe_rerun()
 
+
+elif nav_key == "Training Lab":
+    st.subheader("Training Lab")
+    st.caption("Fine-tune a real Ultralytics detector from a YOLO dataset YAML, then use the resulting `best.pt` in GPU Analysis.")
+
+    train_tab, models_tab = st.tabs(["YOLO26 Detector", "Promoted Models"])
+    with train_tab:
+        form_col, status_col = st.columns([1.1, 1.0])
+        with form_col:
+            st.markdown("#### Train Detector")
+            dataset_yaml = st.text_input(
+                "Dataset YAML",
+                value=str(st.session_state.get("portal_train_dataset_yaml", "")),
+                placeholder=r"C:\datasets\soccer-players\data.yaml",
+                key="portal_train_dataset_yaml",
+                help="Ultralytics YOLO dataset YAML with train/val image paths and class names.",
+            )
+            base_model = st.selectbox(
+                "Base Model",
+                ["yolo26s.pt", "yolo26n.pt", "yolo26m.pt", "yolo26l.pt", "yolo26x.pt", "yolo11s.pt"],
+                index=0,
+                key="portal_train_base_model",
+            )
+            run_name = st.text_input(
+                "Run Name",
+                value="soccer-detector-yolo26",
+                key="portal_train_run_name",
+            )
+            tr_col1, tr_col2, tr_col3 = st.columns(3)
+            train_epochs = int(tr_col1.number_input("Epochs", min_value=1, max_value=1000, value=50, step=1, key="portal_train_epochs"))
+            train_imgsz = int(
+                tr_col2.select_slider(
+                    "Image Size",
+                    options=INFERENCE_IMAGE_SIZE_OPTIONS + [1536],
+                    value=960,
+                    key="portal_train_imgsz",
+                )
+            )
+            train_batch = int(tr_col3.number_input("Batch", min_value=-1, max_value=512, value=8, step=1, key="portal_train_batch"))
+            tr_col4, tr_col5, tr_col6 = st.columns(3)
+            train_device = tr_col4.text_input("Device", value="0" if st.session_state.portal_gpu_ready else "cpu", key="portal_train_device")
+            train_workers = int(tr_col5.number_input("Workers", min_value=0, max_value=64, value=4, step=1, key="portal_train_workers"))
+            train_patience = int(tr_col6.number_input("Patience", min_value=0, max_value=300, value=25, step=1, key="portal_train_patience"))
+            train_notes = st.text_area(
+                "Notes",
+                value="Fine-tune detector for soccer field footage, players, ball, referees, and wide camera views.",
+                key="portal_train_notes",
+            )
+
+            start_disabled = not bool(dataset_yaml.strip())
+            if st.button("Start YOLO26 Training", type="primary", use_container_width=True, disabled=start_disabled):
+                payload = {
+                    "target_model": "yolo-detector",
+                    "notes": train_notes,
+                    "training_config": {
+                        "kind": "ultralytics_yolo",
+                        "dataset_yaml": dataset_yaml.strip(),
+                        "base_model": str(base_model),
+                        "run_name": run_name,
+                        "epochs": train_epochs,
+                        "imgsz": train_imgsz,
+                        "batch": train_batch,
+                        "device": train_device.strip(),
+                        "workers": train_workers,
+                        "patience": train_patience,
+                    },
+                }
+                train_result = create_training_run(api_base, tenant_id, token, payload)
+                if not train_result["ok"]:
+                    st.error(f"Training failed to start: {train_result['payload']}")
+                else:
+                    run_id = str(train_result["payload"].get("run_id") or "")
+                    st.session_state.portal_training_run_id = run_id
+                    st.session_state.portal_flash_message = f"YOLO training queued: {run_id}"
+                    safe_rerun()
+
+        with status_col:
+            st.markdown("#### Training Status")
+            run_id = st.text_input(
+                "Training Run ID",
+                value=str(st.session_state.get("portal_training_run_id", "")),
+                key="portal_training_run_lookup",
+            )
+            run_payload = get_training_run(api_base, tenant_id, token, run_id.strip()) if run_id.strip() else {}
+            if run_payload:
+                st.metric("Status", str(run_payload.get("status") or "-"))
+                st.metric("Gates", "passed" if run_payload.get("gates_passed") else "not passed")
+                candidate_path = str(run_payload.get("candidate_model_version") or "").strip()
+                if candidate_path:
+                    st.text_input("Trained Weights Path", value=candidate_path, key="portal_training_candidate_path")
+                    st.caption("Use this path in GPU Analysis -> Custom Detector Weights.")
+                metrics = dict(run_payload.get("metrics") or {})
+                if metrics:
+                    st.json(metrics)
+                promote_disabled = str(run_payload.get("status")) != "completed" or not candidate_path
+                if st.button("Promote Trained Detector", use_container_width=True, disabled=promote_disabled):
+                    promote_result = api_request(
+                        "POST",
+                        api_base,
+                        f"/training/runs/{run_id.strip()}/promote",
+                        tenant_id,
+                        token,
+                        json_body={
+                            "decision": "approved",
+                            "reason": "approved YOLO detector for processing",
+                            "notes": "Promoted from Training Lab.",
+                            "force": True,
+                        },
+                    )
+                    if promote_result["ok"]:
+                        st.success("Detector promoted. The weights path remains available for GPU Analysis custom detector use.")
+                    else:
+                        st.error(f"Promotion failed: {promote_result['payload']}")
+            else:
+                st.info("Start a YOLO training run, then keep this page open or paste the run id here.")
+
+    with models_tab:
+        models = list_training_models(api_base, tenant_id, token)
+        if not models:
+            st.info("No promoted models yet.")
+        else:
+            st.dataframe(
+                [
+                    {
+                        "target_model": item.get("target_model"),
+                        "version_or_path": item.get("version"),
+                        "promoted": item.get("promoted"),
+                        "created_at": _iso_to_short(item.get("created_at")),
+                    }
+                    for item in models
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
 
 elif nav_key == "Game Library":
     matches = list_matches(api_base, tenant_id, token, limit=200)
@@ -3473,6 +5007,13 @@ elif nav_key == "Game Library":
                     current_camera_mode = "wide"
                 camera_mode = current_camera_mode
                 zoom_factor = float(latest_config.get("zoom_factor", 1.6))
+                gpu_settings = {
+                    "yolo_model": str(latest_config.get("yolo_model") or "yolo26s.pt"),
+                    "tracker_config": str(latest_config.get("tracker_config") or "botsort.yaml"),
+                    "inference_imgsz": int(latest_config.get("inference_imgsz", 960) or 960),
+                    "detection_conf": float(latest_config.get("detection_conf", 0.18) or 0.18),
+                    "vid_stride": int(latest_config.get("vid_stride", 1) or 1),
+                }
                 no_audio = bool(latest_config.get("no_audio", False))
                 overlay = bool(latest_config.get("overlay", False))
                 require_gpu = bool(latest_config.get("require_gpu", False))
@@ -3533,8 +5074,8 @@ elif nav_key == "Game Library":
                     zoom_factor = cam_col2.slider(
                         "Zoom Factor",
                         1.0,
-                        2.5,
-                        float(latest_config.get("zoom_factor", 1.6)),
+                        3.0,
+                        _bounded_float(latest_config.get("zoom_factor", 1.6), 1.6, 1.0, 3.0),
                         0.1,
                         key=f"portal_match_custom_zoom_factor_{selected_match_id}",
                     )
@@ -3555,6 +5096,12 @@ elif nav_key == "Game Library":
                     )
 
                 with custom_advanced_tab:
+                    gpu_settings = _render_gpu_analysis_controls(
+                        context_key=f"portal_match_custom_{selected_match_id}",
+                        config=gpu_settings,
+                        expanded=True,
+                    )
+
                     with st.expander("Logging", expanded=True):
                         selected_log_profile = st.selectbox(
                             "Logging Profile",
@@ -3663,6 +5210,7 @@ elif nav_key == "Game Library":
                             "audio_sensitivity": float(audio_sens),
                             "camera_mode": str(camera_mode),
                             "zoom_factor": float(zoom_factor),
+                            **gpu_settings,
                             "overlay": bool(overlay),
                             "no_audio": bool(no_audio),
                             "require_gpu": bool(require_gpu),
@@ -3895,9 +5443,8 @@ else:
         else:
             payload = job_result["payload"]
             st.session_state.selected_job_id = payload["job_id"]
-            st.markdown(_build_stage_tracker(payload.get("stage"), payload.get("status")), unsafe_allow_html=True)
-            st.progress(float(payload.get("progress", 0.0)))
             diagnostics = get_job_diagnostics(api_base, tenant_id, token, job_id_value)
+            _render_realtime_job_timeline(payload, diagnostics, gpu_health)
             _render_job_diagnostics_panel(diagnostics, is_technical=is_technical)
             st.caption(f"Cancel requested: `{bool(payload.get('cancel_requested', False))}`")
             if is_technical:

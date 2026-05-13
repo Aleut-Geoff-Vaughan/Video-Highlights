@@ -52,9 +52,10 @@ import math
 import argparse
 import csv
 import json
+import time
 from datetime import datetime, timezone
 from dataclasses import dataclass
-from typing import List, Tuple, Dict, Optional
+from typing import Callable, List, Tuple, Dict, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import multiprocessing
 
@@ -95,10 +96,26 @@ class TrackPoint:
 
 
 FOLLOW_CAM_MODES = {"wide", "follow_player", "follow_action"}
+ProgressCallback = Callable[[str, float, str, Optional[Dict[str, object]]], None]
 
 
 def ensure_dir(p: str):
     os.makedirs(p, exist_ok=True)
+
+
+def emit_progress(
+    progress_callback: Optional[ProgressCallback],
+    stage: str,
+    progress: float,
+    message: str,
+    data: Optional[Dict[str, object]] = None,
+) -> None:
+    if progress_callback is None:
+        return
+    try:
+        progress_callback(stage, max(0.0, min(1.0, float(progress))), message, data or {})
+    except Exception as exc:
+        print(f"[warn] Progress callback failed: {exc}")
 
 
 def parse_time(time_str: str) -> float:
@@ -401,6 +418,14 @@ def track_video(
     fps_hint: Optional[float] = None,
     select_roi: bool = False,
     player_roi: Optional[Dict[str, float]] = None,
+    yolo_model: str = "yolo26s.pt",
+    tracker_config: str = "botsort.yaml",
+    inference_imgsz: int = 960,
+    detection_conf: float = 0.18,
+    vid_stride: int = 1,
+    progress_callback: Optional[ProgressCallback] = None,
+    progress_start: float = 0.20,
+    progress_end: float = 0.65,
 ) -> Tuple[Dict[int, List[TrackPoint]], List[TrackPoint], float, Tuple[int, int], Dict[str, object]]:
     """Run YOLO + ByteTrack, return per-ID trajectory, ball trajectory, FPS, and frame size.
     Returns:
@@ -418,6 +443,7 @@ def track_video(
     if not cap.isOpened():
         raise RuntimeError(f"Could not open video: {video_path}")
     fps = fps_hint or cap.get(cv2.CAP_PROP_FPS) or 30.0
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     ok, first = cap.read()
     cap.release()
     if not ok:
@@ -438,20 +464,92 @@ def track_video(
             user_box = np.array([x, y, x + w, y + h], dtype=np.float32)
 
     # YOLO tracking (persons + sports ball for potential future use)
-    model = YOLO("yolov8n.pt")
+    model_name = str(yolo_model or "yolo26s.pt").strip()
+    tracker_name = str(tracker_config or "botsort.yaml").strip()
+    imgsz = max(320, min(1920, int(inference_imgsz or 960)))
+    conf = min(0.9, max(0.01, float(detection_conf or 0.18)))
+    stride = max(1, int(vid_stride or 1))
+    model = YOLO(model_name)
 
     # Enable GPU if available and use half precision for faster inference
     import torch
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"[performance] Using device: {device}")
     if device == 'cuda':
+        try:
+            torch.backends.cudnn.benchmark = True
+            torch.set_float32_matmul_precision("high")
+        except Exception:
+            pass
+        try:
+            model.to(device)
+        except Exception:
+            pass
         print(f"[performance] GPU: {torch.cuda.get_device_name(0)}")
+    print(
+        f"[performance] YOLO runtime: model={model_name}, tracker={tracker_name}, "
+        f"imgsz={imgsz}, conf={conf:.2f}, vid_stride={stride}, half={device == 'cuda'}"
+    )
+    total_tracking_frames = int(math.ceil(total_frames / stride)) if total_frames > 0 else 0
+    emit_progress(
+        progress_callback,
+        "tracking",
+        progress_start,
+        "YOLO tracking started",
+        {
+            "device": device,
+            "gpu": torch.cuda.get_device_name(0) if device == "cuda" else None,
+            "yolo_model": model_name,
+            "tracker_config": tracker_name,
+            "inference_imgsz": imgsz,
+            "detection_conf": conf,
+            "vid_stride": stride,
+            "total_frames": total_frames,
+            "estimated_tracking_frames": total_tracking_frames,
+        },
+    )
 
     # The stream=True iterator yields per-frame results with .boxes and .boxes.id
     tracks: Dict[int, List[TrackPoint]] = {}
     ball_trajectory: List[TrackPoint] = []
+    last_progress_emit = 0.0
 
-    for frame_idx, result in enumerate(model.track(source=video_path, stream=True, tracker="bytetrack.yaml", classes=[0, 32], device=device, half=True if device == 'cuda' else False, verbose=False)):
+    for frame_idx, result in enumerate(
+        model.track(
+            source=video_path,
+            stream=True,
+            tracker=tracker_name,
+            classes=[0, 32],
+            device=device,
+            half=True if device == 'cuda' else False,
+            imgsz=imgsz,
+            conf=conf,
+            vid_stride=stride,
+            persist=True,
+            verbose=False,
+        )
+    ):
+        source_frame_idx = frame_idx * stride
+        if progress_callback is not None and total_tracking_frames > 0:
+            now = time.monotonic()
+            is_first = frame_idx == 0
+            is_last = frame_idx + 1 >= total_tracking_frames
+            if is_first or is_last or (now - last_progress_emit) >= 2.0:
+                fraction = min(1.0, max(0.0, float(frame_idx + 1) / float(total_tracking_frames)))
+                emit_progress(
+                    progress_callback,
+                    "tracking",
+                    progress_start + (progress_end - progress_start) * fraction,
+                    "YOLO tracking frames",
+                    {
+                        "processed_tracking_frames": frame_idx + 1,
+                        "estimated_tracking_frames": total_tracking_frames,
+                        "source_frame_index": source_frame_idx,
+                        "total_frames": total_frames,
+                        "device": device,
+                    },
+                )
+                last_progress_emit = now
         # We care about persons (class 0) and sports ball (class 32). result.boxes.cls, .id, .xyxy
         if result.boxes is None or result.boxes.id is None:
             continue
@@ -459,7 +557,7 @@ def track_video(
         cls = result.boxes.cls.cpu().numpy().astype(int)
         xyxy = result.boxes.xyxy.cpu().numpy()
 
-        t = frame_idx / fps
+        t = source_frame_idx / fps
         for idx, (track_id, c) in enumerate(zip(ids, cls)):
             x1, y1, x2, y2 = xyxy[idx]
             cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
@@ -482,6 +580,17 @@ def track_video(
                 )
 
     # Choose target ID
+    emit_progress(
+        progress_callback,
+        "tracking",
+        progress_end,
+        "YOLO tracking complete",
+        {
+            "person_track_count": len(tracks),
+            "ball_detection_count": len(ball_trajectory),
+            "device": device,
+        },
+    )
     target_id = None
 
     if not tracks:
@@ -777,6 +886,48 @@ def detect_highlights_multi_factor(
     merged = merge_intervals(intervals)
     print(f"[debug] Multi-factor intervals before merge: {len(intervals)}, after merge: {len(merged)}")
 
+    return merged
+
+
+def detect_review_candidate_intervals(
+    times: np.ndarray,
+    speed: np.ndarray,
+    direction_changes: np.ndarray,
+    pre: float,
+    post: float,
+    max_candidates: int = 3,
+) -> List[Tuple[float, float]]:
+    if len(times) == 0 or len(speed) == 0:
+        return []
+
+    speed_norm = (speed - speed.min()) / (speed.max() - speed.min() + 1e-9)
+    if len(direction_changes) == 0:
+        direction_norm = np.zeros_like(speed_norm)
+    else:
+        direction_norm = direction_changes / (np.pi + 1e-9)
+        if len(direction_norm) != len(speed_norm):
+            if len(direction_norm) > len(speed_norm):
+                direction_norm = direction_norm[:len(speed_norm)]
+            else:
+                direction_norm = np.pad(direction_norm, (0, len(speed_norm) - len(direction_norm)), "constant")
+
+    score = (0.75 * speed_norm) + (0.25 * direction_norm)
+    if not np.any(score > 0.0):
+        return []
+
+    order = np.argsort(score)[::-1]
+    selected_times: List[float] = []
+    min_separation = max(8.0, float(pre + post))
+    for idx in order:
+        t = float(times[int(idx)])
+        if all(abs(t - existing) >= min_separation for existing in selected_times):
+            selected_times.append(t)
+        if len(selected_times) >= max(1, int(max_candidates)):
+            break
+
+    intervals = [(max(0.0, t - pre), t + post) for t in sorted(selected_times)]
+    merged = merge_intervals(intervals, min_gap=1.0)
+    print(f"[debug] Review candidate fallback intervals: {len(merged)}")
     return merged
 
 
@@ -1177,6 +1328,12 @@ def process_video_highlights(
     camera_mode: str = "wide",
     zoom_factor: float = 1.6,
     player_roi: Optional[Dict[str, float]] = None,
+    yolo_model: str = "yolo26s.pt",
+    tracker_config: str = "botsort.yaml",
+    inference_imgsz: int = 960,
+    detection_conf: float = 0.18,
+    vid_stride: int = 1,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> bool:
     """
     Core video highlights processing function.
@@ -1201,11 +1358,18 @@ def process_video_highlights(
         camera_mode: wide | follow_player | follow_action
         zoom_factor: Crop zoom level for follow-cam modes
         player_roi: Optional normalized/pixel ROI used to lock onto one player without an interactive popup
+        yolo_model: Ultralytics detector weights used for player/ball tracking
+        tracker_config: Ultralytics tracker config, usually botsort.yaml or bytetrack.yaml
+        inference_imgsz: Inference image size; higher values use more GPU and preserve small players better
+        detection_conf: Detection confidence threshold
+        vid_stride: Analyze every Nth video frame
+        progress_callback: Optional callback for realtime stage/progress telemetry
 
     Returns:
         True if processing succeeded, False otherwise
     """
     # Check GPU requirement
+    emit_progress(progress_callback, "initializing", 0.02, "Validating runtime and GPU requirements")
     if require_gpu:
         import torch
         if not torch.cuda.is_available():
@@ -1215,6 +1379,7 @@ def process_video_highlights(
             print("  2. CUDA drivers are installed (run 'nvidia-smi' to verify)")
             print("  3. PyTorch with CUDA support is installed:")
             print("     pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130")
+            emit_progress(progress_callback, "failed", 1.0, "GPU is required but CUDA is not available")
             return False
 
     # Validate paths
@@ -1223,15 +1388,18 @@ def process_video_highlights(
 
     if not os.path.exists(video_path):
         print(f"Error: Video file not found: {video_path}")
+        emit_progress(progress_callback, "failed", 1.0, "Source video file was not found")
         return False
 
     if not os.path.isfile(video_path):
         print(f"Error: Path is not a file: {video_path}")
+        emit_progress(progress_callback, "failed", 1.0, "Source path is not a file")
         return False
 
     camera_mode = str(camera_mode or "wide").strip().lower()
     if camera_mode not in FOLLOW_CAM_MODES:
         print(f"Error: Unsupported camera_mode '{camera_mode}'. Valid options: {', '.join(sorted(FOLLOW_CAM_MODES))}")
+        emit_progress(progress_callback, "failed", 1.0, "Unsupported camera mode")
         return False
     zoom_factor = max(1.0, float(zoom_factor or 1.0))
 
@@ -1265,27 +1433,71 @@ def process_video_highlights(
     print(f"Camera mode: {camera_mode}")
     if camera_mode != "wide":
         print(f"Zoom factor: {zoom_factor:.2f}x")
+    print(f"Detector: {yolo_model} | Tracker: {tracker_config} | imgsz={int(inference_imgsz)} | conf={float(detection_conf):.2f} | stride={int(vid_stride)}")
     print(f"Spotlight overlay: {'Yes' if overlay else 'No'}")
     print(f"Analysis-only mode: {'Yes' if analysis_only else 'No'}")
     print()
 
     ensure_dir(output_dir)
+    emit_progress(
+        progress_callback,
+        "source",
+        0.06,
+        "Source video and processing configuration resolved",
+        {
+            "video_path": video_path,
+            "output_dir": output_dir,
+            "camera_mode": camera_mode,
+            "yolo_model": yolo_model,
+            "tracker_config": tracker_config,
+            "inference_imgsz": int(inference_imgsz),
+            "vid_stride": int(vid_stride),
+        },
+    )
 
     try:
         # Create trimmed video if needed
         original_video = video_path
+        emit_progress(progress_callback, "trimming", 0.10, "Preparing working video window")
         processing_video, trim_offset = create_trimmed_video(video_path, output_dir, trim_start, trim_end)
+        emit_progress(
+            progress_callback,
+            "trimming",
+            0.18,
+            "Working video window ready",
+            {"processing_video": processing_video, "trim_offset_seconds": round(trim_offset, 3)},
+        )
 
         print("[1/5] Tracking players and ball (YOLO + ByteTrack)...")
         tracks, ball_traj, fps, (W, H), selection_metadata = track_video(
             processing_video,
             select_roi=select_player,
             player_roi=player_roi,
+            yolo_model=yolo_model,
+            tracker_config=tracker_config,
+            inference_imgsz=inference_imgsz,
+            detection_conf=detection_conf,
+            vid_stride=vid_stride,
+            progress_callback=progress_callback,
+            progress_start=0.20,
+            progress_end=0.65,
         )
         target_id = int(selection_metadata.get("target_track_id") or list(tracks.keys())[0])
         traj = tracks[target_id]
+        emit_progress(
+            progress_callback,
+            "tracking",
+            0.67,
+            "Target player track selected",
+            {
+                "target_track_id": target_id,
+                "stitched_track_count": int(selection_metadata.get("stitched_track_count") or 1),
+                "ball_detection_count": len(ball_traj),
+            },
+        )
 
         print("[2/5] Computing multi-factor highlights (speed + ball proximity + direction changes)...")
+        emit_progress(progress_callback, "scoring", 0.70, "Computing speed, ball proximity, and direction-change signals")
         times, speed = compute_speed_series(traj, fps)
 
         # Compute ball proximity scores
@@ -1305,11 +1517,27 @@ def process_video_highlights(
         audio_intervals = []
         if not no_audio:
             print("[3/5] Detecting audio peaks...")
+            emit_progress(progress_callback, "audio", 0.76, "Detecting audio peaks")
             audio_intervals = detect_audio_peaks(processing_video, pre=pre_seconds, post=post_seconds, k=audio_sensitivity)
+        else:
+            emit_progress(progress_callback, "audio", 0.78, "Audio analysis skipped by configuration")
 
         print("[4/5] Merging and pruning intervals...")
+        emit_progress(progress_callback, "bookmarks", 0.82, "Merging detection intervals into review candidates")
         print(f"[debug] Total intervals before merge: multi-factor={len(speed_intervals)}, audio={len(audio_intervals)}")
         intervals = merge_intervals(speed_intervals + audio_intervals)
+        fallback_intervals: List[Tuple[float, float]] = []
+        if not intervals:
+            print("[info] No threshold-based highlights found. Selecting strongest motion windows for review.")
+            fallback_intervals = detect_review_candidate_intervals(
+                times,
+                speed,
+                direction_changes,
+                pre=pre_seconds,
+                post=post_seconds,
+                max_candidates=3,
+            )
+            intervals = merge_intervals(fallback_intervals)
         print(f"[debug] Total intervals after final merge: {len(intervals)}")
 
         # Get video duration to clamp intervals
@@ -1352,6 +1580,13 @@ def process_video_highlights(
                 "mode": camera_mode,
                 "zoom_factor": round(zoom_factor, 3),
             },
+            "detector": {
+                "yolo_model": yolo_model,
+                "tracker_config": tracker_config,
+                "inference_imgsz": int(inference_imgsz),
+                "detection_conf": round(float(detection_conf), 3),
+                "vid_stride": int(vid_stride),
+            },
             "selection": {
                 "manual_select_popup": bool(select_player),
                 "player_roi": dict(player_roi or {}),
@@ -1372,6 +1607,13 @@ def process_video_highlights(
         }
         tracking_manifest_path = write_tracking_manifest(output_dir, tracking_manifest)
         print(f"[analysis] Tracking manifest: {tracking_manifest_path}")
+        emit_progress(
+            progress_callback,
+            "tracking_manifest",
+            0.86,
+            "Tracking manifest written",
+            {"tracking_manifest_path": tracking_manifest_path},
+        )
 
         live_manifest_path = os.path.join(output_dir, "analysis_bookmarks.json")
         live_manifest_context: Dict[str, object] = {
@@ -1395,10 +1637,16 @@ def process_video_highlights(
                 "no_audio": no_audio,
                 "overlay": overlay,
                 "threads": threads,
+                "yolo_model": yolo_model,
+                "tracker_config": tracker_config,
+                "inference_imgsz": int(inference_imgsz),
+                "detection_conf": round(float(detection_conf), 3),
+                "vid_stride": int(vid_stride),
             },
             "stats": {
                 "speed_interval_count": len(speed_intervals),
                 "audio_interval_count": len(audio_intervals),
+                "fallback_interval_count": len(fallback_intervals),
                 "merged_interval_count": len(intervals),
                 "bookmark_count": 0,
             },
@@ -1412,11 +1660,19 @@ def process_video_highlights(
             live_manifest_path=live_manifest_path,
             live_manifest_context=live_manifest_context,
         )
+        emit_progress(
+            progress_callback,
+            "bookmarks",
+            0.90,
+            "Bookmark candidates built",
+            {"bookmark_count": len(bookmarks), "fallback_interval_count": len(fallback_intervals)},
+        )
         manifest: Dict[str, object] = {
             **live_manifest_context,
             "stats": {
                 "speed_interval_count": len(speed_intervals),
                 "audio_interval_count": len(audio_intervals),
+                "fallback_interval_count": len(fallback_intervals),
                 "merged_interval_count": len(intervals),
                 "bookmark_count": len(bookmarks),
             },
@@ -1425,16 +1681,31 @@ def process_video_highlights(
         manifest_path, csv_path = write_analysis_bookmark_files(output_dir, manifest)
         print(f"[analysis] Bookmark manifest: {manifest_path}")
         print(f"[analysis] Bookmark table: {csv_path}")
+        emit_progress(
+            progress_callback,
+            "bookmarks",
+            0.94,
+            "Bookmark manifest and table written",
+            {"analysis_manifest_path": manifest_path, "analysis_table_csv_path": csv_path, "bookmark_count": len(bookmarks)},
+        )
 
         if not intervals:
             print("No highlight intervals found. Bookmark table generated for manual review.")
+            emit_progress(
+                progress_callback,
+                "completed" if analysis_only else "failed",
+                0.98,
+                "Analysis finished with no highlight clip intervals",
+            )
             return bool(analysis_only)
 
         if analysis_only:
             print("[analysis] Analysis-only run complete. Skipped clip rendering.")
+            emit_progress(progress_callback, "completed", 0.98, "Analysis-only run complete")
             return True
 
         print("[5/5] Writing subclips...")
+        emit_progress(progress_callback, "rendering", 0.95, "Rendering highlight clips")
         if camera_mode == "wide":
             clip_paths = write_subclips(original_video, original_intervals, output_dir, max_workers=threads)
         else:
@@ -1463,6 +1734,7 @@ def process_video_highlights(
                 for c in clips:
                     c.close()
             print(f"Wrote {len(clip_paths)} clips and a montage to: {output_dir}")
+        emit_progress(progress_callback, "rendering", 0.98, "Clip rendering complete", {"clip_count": len(clip_paths)})
 
         # Optional overlay rendering
         if overlay:
@@ -1470,6 +1742,7 @@ def process_video_highlights(
             overlay_workers = min(2, threads) if threads else None
             draw_spotlight_overlay(original_video, traj, original_intervals, output_dir, max_workers=overlay_workers)
             print("[overlay] Done.")
+            emit_progress(progress_callback, "overlay", 0.99, "Spotlight overlays rendered")
 
         return True
 
@@ -1477,6 +1750,7 @@ def process_video_highlights(
         print(f"Error during processing: {e}")
         import traceback
         traceback.print_exc()
+        emit_progress(progress_callback, "failed", 1.0, "Processing failed", {"error": str(e)})
         return False
 
 

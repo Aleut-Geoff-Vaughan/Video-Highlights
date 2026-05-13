@@ -275,6 +275,18 @@ class HighlightExportRead(BaseModel):
     created_at: str
 
 
+class AudioEditRead(BaseModel):
+    audio_edit_id: str
+    match_id: str
+    asset_id: str
+    path: str
+    download_url: str
+    mode: str
+    cleanup_profile: str = "none"
+    size_bytes: int = 0
+    created_at: str
+
+
 class FeedbackSubmittedBy(BaseModel):
     user_id: Optional[str] = None
     role: Optional[ReviewerRole] = None
@@ -346,8 +358,9 @@ class FeedbackBatchRead(BaseModel):
 
 
 class TrainingRunCreate(BaseModel):
-    batch_id: str
+    batch_id: Optional[str] = None
     target_model: str = "event-v0"
+    training_config: Dict[str, Any] = Field(default_factory=dict)
     notes: Optional[str] = None
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -192,3 +193,65 @@ def test_training_batch_and_run_and_agent_query(client: TestClient) -> None:
     )
     assert agent.status_code == 200, agent.text
     assert "answer" in agent.json()
+
+
+def test_yolo_training_run_returns_trained_weights_path(client: TestClient, monkeypatch, tmp_path) -> None:
+    dataset_yaml = tmp_path / "data.yaml"
+    dataset_yaml.write_text("path: .\ntrain: images/train\nval: images/val\nnames: [player, ball]\n", encoding="utf-8")
+    best_weights = tmp_path / "runs" / "detect" / "soccer" / "weights" / "best.pt"
+    best_weights.parent.mkdir(parents=True)
+    best_weights.write_bytes(b"fake-weights")
+
+    def _fake_train(config):  # noqa: ANN001
+        assert config["kind"] == "ultralytics_yolo"
+        assert config["dataset_yaml"] == str(dataset_yaml)
+        assert config["base_model"] == "yolo26s.pt"
+        return {
+            "candidate_model_version": str(best_weights),
+            "metrics": {
+                "training_type": "ultralytics_yolo",
+                "best_weights_path": str(best_weights),
+                "base_model": "yolo26s.pt",
+            },
+            "gates_passed": True,
+        }
+
+    monkeypatch.setattr("backend.services.job_runner.train_ultralytics_yolo", _fake_train)
+
+    run = client.post(
+        "/v1/training/runs",
+        json={
+            "target_model": "yolo-detector",
+            "training_config": {
+                "kind": "ultralytics_yolo",
+                "dataset_yaml": str(dataset_yaml),
+                "base_model": "yolo26s.pt",
+                "epochs": 1,
+                "imgsz": 640,
+                "batch": 1,
+                "device": "cpu",
+            },
+        },
+    )
+    assert run.status_code == 202, run.text
+    run_id = run.json()["run_id"]
+
+    payload = {}
+    for _ in range(30):
+        response = client.get(f"/v1/training/runs/{run_id}")
+        assert response.status_code == 200
+        payload = response.json()
+        if payload["status"] == "completed":
+            break
+        time.sleep(0.05)
+
+    assert payload["status"] == "completed"
+    assert payload["candidate_model_version"] == str(best_weights)
+    assert payload["metrics"]["training_type"] == "ultralytics_yolo"
+
+    promote = client.post(
+        f"/v1/training/runs/{run_id}/promote",
+        json={"decision": "approved", "reason": "pytest yolo promotion", "force": True},
+    )
+    assert promote.status_code == 200, promote.text
+    assert promote.json()["version"] == str(best_weights)
