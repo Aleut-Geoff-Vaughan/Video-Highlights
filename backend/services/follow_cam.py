@@ -11,6 +11,7 @@ from .ffmpeg_tools import ffmpeg_available, ffmpeg_exe
 from ..utils import ensure_dir
 
 TrackSample = Tuple[float, float, float]
+VideoCenter = Tuple[float, float]
 
 
 def _import_cv2():
@@ -221,6 +222,175 @@ def _mux_audio(
     return result.returncode == 0 and Path(output_path).exists() and Path(output_path).stat().st_size > 0
 
 
+def _ffmpeg_encoder_available(encoder: str) -> bool:
+    if not ffmpeg_available():
+        return False
+    result = subprocess.run(
+        [ffmpeg_exe(), "-hide_banner", "-v", "error", "-encoders"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0 and encoder in result.stdout
+
+
+def _render_follow_cam_with_ffmpeg(
+    *,
+    video_path: str,
+    output_path: Path,
+    start_seconds: float,
+    centers: Sequence[VideoCenter],
+    fps: float,
+    frame_size: Tuple[int, int],
+    zoom_factor: float,
+    encoder: str,
+) -> int:
+    cv2 = _import_cv2()
+    frame_w, frame_h = frame_size
+    if encoder == "h264_nvenc":
+        encoder_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "23"]
+    else:
+        encoder_args = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"]
+
+    cmd = [
+        ffmpeg_exe(),
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "bgr24",
+        "-s",
+        f"{frame_w}x{frame_h}",
+        "-r",
+        f"{fps:.6f}",
+        "-i",
+        "pipe:0",
+        "-an",
+        *encoder_args,
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+    process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        process.kill()
+        raise RuntimeError(f"Could not open video: {video_path}")
+
+    written = 0
+    try:
+        cap.set(cv2.CAP_PROP_POS_MSEC, start_seconds * 1000.0)
+        for center in centers:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            zoomed = crop_frame_to_center(frame, center, zoom_factor, output_size=(frame_w, frame_h))
+            if process.stdin is None:
+                break
+            process.stdin.write(zoomed.tobytes())
+            written += 1
+    except Exception:
+        process.kill()
+        raise
+    finally:
+        cap.release()
+        if process.stdin is not None:
+            try:
+                process.stdin.close()
+            except OSError:
+                pass
+
+    stderr = process.stderr.read().decode("utf-8", errors="ignore") if process.stderr is not None else ""
+    return_code = process.wait()
+    if return_code != 0 or written <= 0 or not output_path.exists() or output_path.stat().st_size <= 0:
+        output_path.unlink(missing_ok=True)
+        raise RuntimeError(f"ffmpeg follow-cam encode failed with {encoder}: {stderr.strip()}")
+    return written
+
+
+def _render_follow_cam_with_opencv(
+    *,
+    video_path: str,
+    output_path: Path,
+    start_seconds: float,
+    centers: Sequence[VideoCenter],
+    fps: float,
+    frame_size: Tuple[int, int],
+    zoom_factor: float,
+) -> int:
+    cv2 = _import_cv2()
+    frame_w, frame_h = frame_size
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video: {video_path}")
+    cap.set(cv2.CAP_PROP_POS_MSEC, start_seconds * 1000.0)
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(str(output_path), fourcc, fps, (frame_w, frame_h))
+    if not writer.isOpened():
+        cap.release()
+        raise RuntimeError(f"Could not open follow-cam writer for: {output_path}")
+
+    written = 0
+    try:
+        for center in centers:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            writer.write(crop_frame_to_center(frame, center, zoom_factor, output_size=(frame_w, frame_h)))
+            written += 1
+    finally:
+        writer.release()
+        cap.release()
+    return written
+
+
+def _render_follow_cam_video(
+    *,
+    video_path: str,
+    output_path: Path,
+    start_seconds: float,
+    centers: Sequence[VideoCenter],
+    fps: float,
+    frame_size: Tuple[int, int],
+    zoom_factor: float,
+) -> Tuple[int, str]:
+    for encoder in ("h264_nvenc", "libx264"):
+        if not _ffmpeg_encoder_available(encoder):
+            continue
+        try:
+            output_path.unlink(missing_ok=True)
+            written = _render_follow_cam_with_ffmpeg(
+                video_path=video_path,
+                output_path=output_path,
+                start_seconds=start_seconds,
+                centers=centers,
+                fps=fps,
+                frame_size=frame_size,
+                zoom_factor=zoom_factor,
+                encoder=encoder,
+            )
+            return written, encoder
+        except Exception as exc:
+            print(f"[follow-cam] {encoder} encode unavailable for this clip: {exc}")
+
+    output_path.unlink(missing_ok=True)
+    written = _render_follow_cam_with_opencv(
+        video_path=video_path,
+        output_path=output_path,
+        start_seconds=start_seconds,
+        centers=centers,
+        fps=fps,
+        frame_size=frame_size,
+        zoom_factor=zoom_factor,
+    )
+    return written, "mp4v"
+
+
 def render_follow_cam_clip(
     video_path: str,
     output_path: str,
@@ -266,24 +436,17 @@ def render_follow_cam_clip(
         smooth_factor=smooth_factor,
     )
 
-    cap.set(cv2.CAP_PROP_POS_MSEC, start_s * 1000.0)
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(str(temp_file), fourcc, fps, (frame_w, frame_h))
-    if not writer.isOpened():
-        cap.release()
-        raise RuntimeError(f"Could not open follow-cam writer for: {temp_file}")
-
-    written = 0
-    try:
-        for center in centers:
-            ok, frame = cap.read()
-            if not ok:
-                break
-            writer.write(crop_frame_to_center(frame, center, zoom_factor, output_size=(frame_w, frame_h)))
-            written += 1
-    finally:
-        writer.release()
-        cap.release()
+    cap.release()
+    written, encoder = _render_follow_cam_video(
+        video_path=video_path,
+        output_path=temp_file,
+        start_seconds=start_s,
+        centers=centers,
+        fps=fps,
+        frame_size=(frame_w, frame_h),
+        zoom_factor=zoom_factor,
+    )
+    print(f"[follow-cam] Encoded {written} frames with {encoder}")
 
     if written <= 0 or not temp_file.exists() or temp_file.stat().st_size <= 0:
         temp_file.unlink(missing_ok=True)
