@@ -1603,8 +1603,8 @@ def _recommended_job_config() -> Dict[str, Any]:
         "min_clip_duration": 4.0,
         "speed_sensitivity": 2.0,
         "audio_sensitivity": 2.0,
-        "camera_mode": "wide",
-        "zoom_factor": 1.6,
+        "camera_mode": "follow_action",
+        "zoom_factor": 1.8,
         "yolo_model": "yolo26s.pt",
         "tracker_config": "botsort.yaml",
         "inference_imgsz": 960,
@@ -1613,7 +1613,7 @@ def _recommended_job_config() -> Dict[str, Any]:
         "overlay": False,
         "no_audio": False,
         "require_gpu": False,
-        "analysis_only": True,
+        "analysis_only": False,
         "log_profile": "detailed",
     }
 
@@ -1958,7 +1958,7 @@ def _run_stage_cards(job: Dict[str, Any], artifacts: Dict[str, Any]) -> Tuple[Li
     status = str(job.get("status") or "").lower()
     config = job.get("config", {}) if isinstance(job.get("config"), dict) else {}
     result = job.get("result", {}) if isinstance(job.get("result"), dict) else {}
-    analysis_only = bool(config.get("analysis_only", True))
+    analysis_only = bool(config.get("analysis_only", False))
     terminal_success = status == "completed"
     terminal_problem = status in {"failed", "canceled", "cancel_requested"}
     has_trim = _artifact_present(artifacts, "trimmed_working_video.mp4")
@@ -2862,8 +2862,15 @@ def _render_studio_editor(
     latest_config = dict((latest_job or {}).get("config", {}) or _recommended_job_config())
     if str(latest_config.get("camera_mode", "wide")) == "wide":
         latest_config["camera_mode"] = "follow_action"
-    latest_config.setdefault("zoom_factor", 1.8)
-    latest_config.setdefault("analysis_only", False)
+    latest_config["zoom_factor"] = max(1.8, _bounded_float(latest_config.get("zoom_factor", 1.8), 1.8, 1.0, 3.0))
+    latest_config["analysis_only"] = False
+    editor_defaults_key = f"studio_editor_zoom_defaults_{selected_match_id}"
+    editor_source_id = str((latest_job or {}).get("job_id") or selected_match_id)
+    if st.session_state.get(editor_defaults_key) != editor_source_id:
+        st.session_state[f"studio_editor_analysis_only_{selected_match_id}"] = False
+        st.session_state[f"studio_editor_camera_{selected_match_id}"] = str(latest_config.get("camera_mode") or "follow_action")
+        st.session_state[f"studio_editor_zoom_{selected_match_id}"] = float(latest_config.get("zoom_factor", 1.8) or 1.8)
+        st.session_state[editor_defaults_key] = editor_source_id
 
     st.markdown('<div class="yt-editor-shell">', unsafe_allow_html=True)
     editor_col, preview_col = st.columns([1.0, 1.35])
@@ -2914,8 +2921,9 @@ def _render_studio_editor(
         )
         analysis_only = st.checkbox(
             "Analysis only",
-            value=bool(latest_config.get("analysis_only", False)),
+            value=False,
             key=f"studio_editor_analysis_only_{selected_match_id}",
+            help="Leave unchecked when validating zoom/follow-cam clip output.",
         )
 
         with st.expander("Player Lock", expanded=True):
@@ -4086,8 +4094,13 @@ elif nav_key == "New Processing Run":
             speed_sens = 2.0
             audio_sens = 2.0
             thread_count = 0
-            camera_mode = "wide"
-            zoom_factor = 1.6
+            if st.session_state.get("portal_new_zoom_defaults_version") != "zoom_clips_v1":
+                st.session_state.portal_new_analysis_only = False
+                st.session_state.portal_new_camera_mode = "follow_action"
+                st.session_state.portal_new_zoom_factor = 1.8
+                st.session_state.portal_new_zoom_defaults_version = "zoom_clips_v1"
+            camera_mode = "follow_action"
+            zoom_factor = 1.8
             gpu_settings = {
                 "yolo_model": "yolo26s.pt",
                 "tracker_config": "botsort.yaml",
@@ -4098,7 +4111,7 @@ elif nav_key == "New Processing Run":
             no_audio = False
             overlay = False
             require_gpu = bool(st.session_state.get("portal_gpu_ready", False))
-            analysis_only = True
+            analysis_only = False
             log_profile = "detailed"
             player_roi_payload: Dict[str, Any] = {"enabled": False, "roi": None}
 
@@ -4185,9 +4198,9 @@ elif nav_key == "New Processing Run":
                 model_version = a_col2.selectbox("Model Version", model_versions, index=0, key="portal_new_model_version")
                 analysis_only = a_col3.checkbox(
                     "Analysis Only",
-                    value=True,
+                    value=False,
                     key="portal_new_analysis_only",
-                    help="Generate bookmark table/events quickly without writing highlight video clips.",
+                    help="Leave unchecked to render zoom/follow-cam clips. Check only when you want bookmarks/events without video output.",
                 )
                 selected_targets = st.multiselect(
                     "Event Targets",
@@ -4206,12 +4219,12 @@ elif nav_key == "New Processing Run":
                 out_col1, out_col2, out_col3 = st.columns(3)
                 camera_mode = out_col1.selectbox(
                     "Camera Mode",
-                    ["wide", "follow_action", "follow_player"],
+                    ["follow_action", "follow_player", "wide"],
                     index=0,
                     key="portal_new_camera_mode",
                     help="`follow_action` keeps the tracked player central while nudging toward nearby ball action.",
                 )
-                zoom_factor = out_col2.slider("Zoom Factor", 1.0, 3.0, 1.6, 0.1, key="portal_new_zoom_factor")
+                zoom_factor = out_col2.slider("Zoom Factor", 1.0, 3.0, 1.8, 0.1, key="portal_new_zoom_factor")
                 require_gpu = out_col3.checkbox(
                     "Require GPU",
                     value=bool(st.session_state.get("portal_gpu_ready", False)),
@@ -4461,12 +4474,24 @@ elif nav_key == "New Processing Run":
                     value="",
                     key="portal_rerun_custom_targets",
                 )
+                source_config = dict(source_job.get("config", {}) or {})
+                rerun_default_camera = str(source_config.get("camera_mode") or "follow_action")
+                if rerun_default_camera == "wide":
+                    rerun_default_camera = "follow_action"
+                if rerun_default_camera not in {"wide", "follow_action", "follow_player"}:
+                    rerun_default_camera = "follow_action"
+                rerun_default_zoom = max(1.8, _bounded_float(source_config.get("zoom_factor", 1.8), 1.8, 1.0, 3.0))
+                if st.session_state.get("portal_rerun_zoom_defaults_job_id") != source_job["job_id"]:
+                    st.session_state.portal_rerun_analysis_only = False
+                    st.session_state.portal_rerun_camera_mode = rerun_default_camera
+                    st.session_state.portal_rerun_zoom_factor = rerun_default_zoom
+                    st.session_state.portal_rerun_zoom_defaults_job_id = source_job["job_id"]
                 rerun_analysis_only = st.checkbox(
                     "Analysis Only (No Clips)",
-                    value=bool(source_job.get("config", {}).get("analysis_only", False)),
+                    value=False,
                     key="portal_rerun_analysis_only",
+                    help="Leave unchecked when validating zoom/follow-cam clip output.",
                 )
-                source_config = dict(source_job.get("config", {}) or {})
                 source_log_profile = str(source_config.get("log_profile") or "detailed").strip().lower()
                 if source_log_profile not in {"standard", "detailed", "diagnostic"}:
                     source_log_profile = "detailed"
@@ -4477,10 +4502,10 @@ elif nav_key == "New Processing Run":
                     key="portal_rerun_log_profile",
                     help="Detailed logs are useful while validating reruns. Diagnostic captures deeper raw config checkpoints.",
                 ).lower()
-                rerun_camera_options = ["wide", "follow_action", "follow_player"]
-                source_camera_mode = str(source_config.get("camera_mode") or "wide")
+                rerun_camera_options = ["follow_action", "follow_player", "wide"]
+                source_camera_mode = rerun_default_camera
                 if source_camera_mode not in rerun_camera_options:
-                    source_camera_mode = "wide"
+                    source_camera_mode = "follow_action"
                 rerun_cam_col1, rerun_cam_col2 = st.columns(2)
                 rerun_camera_mode = rerun_cam_col1.selectbox(
                     "Camera Mode",
@@ -4492,7 +4517,7 @@ elif nav_key == "New Processing Run":
                     "Zoom Factor",
                     1.0,
                     3.0,
-                    _bounded_float(source_config.get("zoom_factor", 1.6), 1.6, 1.0, 3.0),
+                    rerun_default_zoom,
                     0.1,
                     key="portal_rerun_zoom_factor",
                 )
@@ -4986,7 +5011,7 @@ elif nav_key == "Game Library":
 
                 profile_name = custom_profile_default
                 model_version = custom_model_default if custom_model_default in model_versions else (model_versions[0] if model_versions else "event-v0")
-                analysis_only = bool(latest_config.get("analysis_only", False))
+                analysis_only = False
                 targets: List[str] = [t for t in custom_targets_default if t in EVENT_TARGET_OPTIONS]
                 custom_targets = ""
                 pre_seconds = float(latest_config.get("pre_seconds", 2.0))
@@ -5001,12 +5026,21 @@ elif nav_key == "Game Library":
                     "trim_end": None,
                     "label": _format_trim_window(latest_config),
                 }
-                camera_mode_options = ["wide", "follow_action", "follow_player"]
-                current_camera_mode = str(latest_config.get("camera_mode") or "wide")
+                camera_mode_options = ["follow_action", "follow_player", "wide"]
+                current_camera_mode = str(latest_config.get("camera_mode") or "follow_action")
+                if current_camera_mode == "wide":
+                    current_camera_mode = "follow_action"
                 if current_camera_mode not in camera_mode_options:
-                    current_camera_mode = "wide"
+                    current_camera_mode = "follow_action"
                 camera_mode = current_camera_mode
-                zoom_factor = float(latest_config.get("zoom_factor", 1.6))
+                zoom_factor = max(1.8, _bounded_float(latest_config.get("zoom_factor", 1.8), 1.8, 1.0, 3.0))
+                custom_defaults_key = f"portal_match_custom_zoom_defaults_{selected_match_id}"
+                custom_source_id = str((latest_job or {}).get("job_id") or selected_match_id)
+                if st.session_state.get(custom_defaults_key) != custom_source_id:
+                    st.session_state[f"portal_match_custom_analysis_only_{selected_match_id}"] = False
+                    st.session_state[f"portal_match_custom_camera_mode_{selected_match_id}"] = current_camera_mode
+                    st.session_state[f"portal_match_custom_zoom_factor_{selected_match_id}"] = zoom_factor
+                    st.session_state[custom_defaults_key] = custom_source_id
                 gpu_settings = {
                     "yolo_model": str(latest_config.get("yolo_model") or "yolo26s.pt"),
                     "tracker_config": str(latest_config.get("tracker_config") or "botsort.yaml"),
@@ -5041,8 +5075,9 @@ elif nav_key == "Game Library":
                     )
                     analysis_only = custom_col3.checkbox(
                         "Analysis Only",
-                        value=bool(latest_config.get("analysis_only", False)),
+                        value=False,
                         key=f"portal_match_custom_analysis_only_{selected_match_id}",
+                        help="Leave unchecked when validating zoom/follow-cam clip output.",
                     )
 
                     targets = st.multiselect(
@@ -5075,7 +5110,7 @@ elif nav_key == "Game Library":
                         "Zoom Factor",
                         1.0,
                         3.0,
-                        _bounded_float(latest_config.get("zoom_factor", 1.6), 1.6, 1.0, 3.0),
+                        zoom_factor,
                         0.1,
                         key=f"portal_match_custom_zoom_factor_{selected_match_id}",
                     )

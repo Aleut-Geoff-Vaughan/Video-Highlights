@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
-from backend.services.follow_cam import build_follow_cam_centers, crop_frame_to_center
+from backend.services.follow_cam import build_follow_cam_centers, crop_frame_to_center, render_follow_cam_clip
 
 
 def test_build_follow_cam_centers_tracks_player_motion() -> None:
@@ -92,3 +93,53 @@ def test_build_follow_cam_centers_recenters_when_player_track_goes_stale() -> No
     assert centers[2][0] > centers[1][0]
     assert centers[2][0] <= 200.0
     assert centers[1][1] == centers[2][1] == 100.0
+
+
+def test_render_follow_cam_clip_writes_zoomed_video(tmp_path) -> None:
+    cv2 = pytest.importorskip("cv2")
+    source_path = tmp_path / "source.mp4"
+    output_path = tmp_path / "zoomed.mp4"
+    fps = 5.0
+    width, height = 64, 48
+    writer = cv2.VideoWriter(
+        str(source_path),
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        fps,
+        (width, height),
+    )
+    assert writer.isOpened()
+
+    player_track = []
+    try:
+        for frame_index in range(12):
+            frame = np.zeros((height, width, 3), dtype=np.uint8)
+            x = 16 + (frame_index * 3)
+            y = 24
+            cv2.rectangle(frame, (x - 3, y - 3), (x + 3, y + 3), (0, 255, 0), thickness=-1)
+            writer.write(frame)
+            player_track.append((frame_index / fps, float(x), float(y)))
+    finally:
+        writer.release()
+
+    rendered = render_follow_cam_clip(
+        video_path=str(source_path),
+        output_path=str(output_path),
+        start_seconds=0.0,
+        end_seconds=2.0,
+        player_track=player_track,
+        ball_track=None,
+        zoom_factor=2.0,
+        include_audio=False,
+    )
+
+    assert rendered == str(output_path.resolve())
+    assert output_path.exists()
+    assert output_path.stat().st_size > 0
+
+    cap = cv2.VideoCapture(str(output_path))
+    ok, first_frame = cap.read()
+    cap.release()
+
+    assert ok
+    center_region = first_frame[height // 2 - 4 : height // 2 + 5, width // 2 - 4 : width // 2 + 5]
+    assert float(center_region[:, :, 1].mean()) > 60.0
