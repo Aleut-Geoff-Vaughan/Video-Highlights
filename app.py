@@ -1614,6 +1614,7 @@ def _recommended_job_config() -> Dict[str, Any]:
         "no_audio": False,
         "require_gpu": False,
         "analysis_only": False,
+        "render_full_follow_cam": False,
         "log_profile": "detailed",
     }
 
@@ -1959,6 +1960,7 @@ def _run_stage_cards(job: Dict[str, Any], artifacts: Dict[str, Any]) -> Tuple[Li
     config = job.get("config", {}) if isinstance(job.get("config"), dict) else {}
     result = job.get("result", {}) if isinstance(job.get("result"), dict) else {}
     analysis_only = bool(config.get("analysis_only", False))
+    render_full_follow_cam = bool(config.get("render_full_follow_cam", False))
     terminal_success = status == "completed"
     terminal_problem = status in {"failed", "canceled", "cancel_requested"}
     has_trim = _artifact_present(artifacts, "trimmed_working_video.mp4")
@@ -1971,6 +1973,12 @@ def _run_stage_cards(job: Dict[str, Any], artifacts: Dict[str, Any]) -> Tuple[Li
         and str(item.get("name", "")).lower() != "trimmed_working_video.mp4"
     ]
     bookmark_count = int(result.get("bookmarks_count", 0) or 0)
+    full_zoom_done = any(
+        str(item.get("name", "")).lower().startswith("full_")
+        and str(item.get("name", "")).lower().endswith("_zoom.mp4")
+        for item in list(artifacts.get("files") or [])
+        if isinstance(item, dict)
+    )
 
     stage_defs = [
         {
@@ -2010,6 +2018,15 @@ def _run_stage_cards(job: Dict[str, Any], artifacts: Dict[str, Any]) -> Tuple[Li
             "done": has_bookmarks or bookmark_count > 0 or terminal_success,
         },
     ]
+    if render_full_follow_cam and not analysis_only:
+        stage_defs.append(
+            {
+                "key": "full_zoom",
+                "label": "Full Zoom",
+                "desc": "Continuous follow-cam movie for the selected window/full source.",
+                "done": full_zoom_done or terminal_success,
+            }
+        )
     if analysis_only:
         stage_defs.append(
             {
@@ -2925,6 +2942,13 @@ def _render_studio_editor(
             key=f"studio_editor_analysis_only_{selected_match_id}",
             help="Leave unchecked when validating zoom/follow-cam clip output.",
         )
+        render_full_follow_cam = st.checkbox(
+            "Also export full zoom movie",
+            value=bool(latest_config.get("render_full_follow_cam", False)),
+            key=f"studio_editor_full_follow_cam_{selected_match_id}",
+            disabled=(camera_mode == "wide") or analysis_only,
+            help="Renders one continuous follow-cam movie for the selected trim window, or the entire source when no trim is set.",
+        )
 
         with st.expander("Player Lock", expanded=True):
             player_roi_payload = _render_player_roi_selector(
@@ -2950,6 +2974,7 @@ def _render_studio_editor(
                         "camera_mode": str(camera_mode),
                         "zoom_factor": float(zoom_factor),
                         "analysis_only": bool(analysis_only),
+                        "render_full_follow_cam": bool(render_full_follow_cam and camera_mode != "wide" and not analysis_only),
                         **gpu_settings,
                         "run_created_at": datetime.utcnow().isoformat(),
                         "run_created_from": "studio_youtube_editor",
@@ -3907,6 +3932,7 @@ if nav_key == "Portal Home":
                         st.caption(
                             f"Model `{selected_job.get('config', {}).get('model_version', '-')}` | "
                             f"Camera `{selected_job.get('config', {}).get('camera_mode', 'wide')}` | "
+                            f"Full zoom `{bool(selected_job.get('config', {}).get('render_full_follow_cam', False))}` | "
                             f"Window `{_format_trim_window(selected_job.get('config', {}) or {})}` | "
                             f"Targets `{_focus_targets_from_config(selected_job.get('config', {}))}`"
                         )
@@ -4110,6 +4136,7 @@ elif nav_key == "New Processing Run":
             }
             no_audio = False
             overlay = False
+            render_full_follow_cam = False
             require_gpu = bool(st.session_state.get("portal_gpu_ready", False))
             analysis_only = False
             log_profile = "detailed"
@@ -4231,9 +4258,16 @@ elif nav_key == "New Processing Run":
                     key="portal_new_require_gpu",
                     help="When enabled, the run fails early unless PyTorch CUDA is available.",
                 )
-                output_col1, output_col2 = st.columns(2)
+                output_col1, output_col2, output_col3 = st.columns(3)
                 no_audio = output_col1.checkbox("Disable Audio Detection", value=False, key="portal_new_no_audio")
                 overlay = output_col2.checkbox("Generate Spotlight Overlay", value=False, key="portal_new_overlay")
+                render_full_follow_cam = output_col3.checkbox(
+                    "Export Full Zoom Movie",
+                    value=False,
+                    key="portal_new_render_full_follow_cam",
+                    disabled=(camera_mode == "wide") or analysis_only,
+                    help="Render one continuous zoom/follow-cam video for the selected test window, or the whole game if the test window is off.",
+                )
 
             with advanced_tab:
                 gpu_settings = _render_gpu_analysis_controls(
@@ -4393,6 +4427,7 @@ elif nav_key == "New Processing Run":
                             "no_audio": bool(no_audio),
                             "require_gpu": bool(require_gpu),
                             "analysis_only": bool(analysis_only),
+                            "render_full_follow_cam": bool(render_full_follow_cam and camera_mode != "wide" and not analysis_only),
                             "run_created_at": datetime.utcnow().isoformat(),
                             "run_created_from": "portal_ui",
                             "ingest_mode": ingest_mode,
@@ -4521,6 +4556,13 @@ elif nav_key == "New Processing Run":
                     0.1,
                     key="portal_rerun_zoom_factor",
                 )
+                rerun_render_full_follow_cam = st.checkbox(
+                    "Export Full Zoom Movie",
+                    value=bool(source_config.get("render_full_follow_cam", False)),
+                    key="portal_rerun_render_full_follow_cam",
+                    disabled=(rerun_camera_mode == "wide") or rerun_analysis_only,
+                    help="Also render one continuous follow-cam movie for this rerun's trim window/full source.",
+                )
                 rerun_gpu_settings = _render_gpu_analysis_controls(
                     context_key=f"portal_rerun_{source_job['job_id']}",
                     config=source_config,
@@ -4553,6 +4595,9 @@ elif nav_key == "New Processing Run":
                     overrides["analysis_only"] = bool(rerun_analysis_only)
                     overrides["camera_mode"] = str(rerun_camera_mode)
                     overrides["zoom_factor"] = float(rerun_zoom_factor)
+                    overrides["render_full_follow_cam"] = bool(
+                        rerun_render_full_follow_cam and rerun_camera_mode != "wide" and not rerun_analysis_only
+                    )
                     overrides.update(rerun_gpu_settings)
                     overrides["log_profile"] = rerun_log_profile
                     overrides["test_window_enabled"] = bool(rerun_trim_window["enabled"])
@@ -4978,6 +5023,7 @@ elif nav_key == "Game Library":
                         st.write(f"Window: `{_format_trim_window(latest_config)}`")
                         st.write(f"Targets: `{summary_targets}`")
                         st.write(f"Analysis-only: `{bool(latest_config.get('analysis_only', False))}`")
+                        st.write(f"Full zoom movie: `{bool(latest_config.get('render_full_follow_cam', False))}`")
                     if st.button("Reprocess This Match (Latest Config)", key=f"portal_match_reprocess_latest_{selected_match_id}"):
                         next_config = dict(latest_config)
                         next_config["run_created_at"] = datetime.utcnow().isoformat()
@@ -5050,6 +5096,7 @@ elif nav_key == "Game Library":
                 }
                 no_audio = bool(latest_config.get("no_audio", False))
                 overlay = bool(latest_config.get("overlay", False))
+                render_full_follow_cam = bool(latest_config.get("render_full_follow_cam", False))
                 require_gpu = bool(latest_config.get("require_gpu", False))
                 current_log_profile = str(latest_config.get("log_profile") or "detailed").strip().lower()
                 if current_log_profile not in {"standard", "detailed", "diagnostic"}:
@@ -5128,6 +5175,13 @@ elif nav_key == "Game Library":
                         "Require GPU",
                         value=bool(latest_config.get("require_gpu", False)),
                         key=f"portal_match_custom_require_gpu_{selected_match_id}",
+                    )
+                    render_full_follow_cam = st.checkbox(
+                        "Export Full Zoom Movie",
+                        value=bool(latest_config.get("render_full_follow_cam", False)),
+                        key=f"portal_match_custom_full_follow_cam_{selected_match_id}",
+                        disabled=(camera_mode == "wide") or analysis_only,
+                        help="Renders one continuous zoom/follow-cam movie for the selected trim window, or the whole source when no trim is set.",
                     )
 
                 with custom_advanced_tab:
@@ -5250,6 +5304,7 @@ elif nav_key == "Game Library":
                             "no_audio": bool(no_audio),
                             "require_gpu": bool(require_gpu),
                             "analysis_only": bool(analysis_only),
+                            "render_full_follow_cam": bool(render_full_follow_cam and camera_mode != "wide" and not analysis_only),
                             "run_created_at": datetime.utcnow().isoformat(),
                             "run_created_from": "portal_match_workspace_custom",
                             "test_window_enabled": bool(trim_window["enabled"]),
@@ -5298,6 +5353,7 @@ elif nav_key == "Game Library":
                     st.write(f"Window: `{_format_trim_window(job.get('config', {}) or {})}`")
                     st.write(f"Targets: `{_focus_targets_from_config(job.get('config', {}))}`")
                     st.write(f"Analysis-only: `{bool(job.get('config', {}).get('analysis_only', False))}`")
+                    st.write(f"Full zoom movie: `{bool(job.get('config', {}).get('render_full_follow_cam', False))}`")
                     st.write(f"Bookmarks detected: `{int((job.get('result', {}) or {}).get('bookmarks_count', 0) or 0)}`")
                     st.write(f"Updated: `{_iso_to_short(job.get('updated_at'))}`")
 
@@ -5492,6 +5548,7 @@ else:
                 st.write(f"Camera: `{payload.get('config', {}).get('camera_mode', 'wide')}`")
                 st.write(f"Window: `{_format_trim_window(payload.get('config', {}) or {})}`")
                 st.write(f"Targets: `{_focus_targets_from_config(payload.get('config', {}))}`")
+                st.write(f"Full zoom movie: `{bool(payload.get('config', {}).get('render_full_follow_cam', False))}`")
                 st.write(f"Bookmarks: `{int((payload.get('result', {}) or {}).get('bookmarks_count', 0) or 0)}`")
             status_value = str(payload.get("status", "")).lower()
             if auto_refresh and status_value in {"queued", "claimed", "running", "cancel_requested"}:

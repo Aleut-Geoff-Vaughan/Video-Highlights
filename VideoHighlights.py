@@ -1193,6 +1193,68 @@ def write_follow_cam_subclips(
     return paths
 
 
+def write_full_follow_cam_video(
+    video_path: str,
+    interval: Tuple[float, float],
+    out_dir: str,
+    player_traj: List[TrackPoint],
+    ball_traj: List[TrackPoint],
+    camera_mode: str = "follow_action",
+    zoom_factor: float = 1.6,
+    track_time_offset_seconds: float = 0.0,
+    progress_callback: Optional[ProgressCallback] = None,
+) -> Optional[str]:
+    start_s, end_s = interval
+    if end_s <= start_s:
+        print(f"[warn] Full follow-cam interval is empty: {start_s:.2f}s - {end_s:.2f}s")
+        return None
+
+    safe_mode = str(camera_mode or "follow_action").strip().lower()
+    out_path = os.path.join(out_dir, f"full_{safe_mode}_zoom.mp4")
+    ball_weight = 0.35 if safe_mode == "follow_action" else 0.0
+    duration_s = float(end_s - start_s)
+    print(
+        f"[follow-cam] Rendering full zoom movie: {format_time(start_s)} - {format_time(end_s)} "
+        f"({duration_s:.1f}s), mode={safe_mode}, zoom={zoom_factor:.2f}x"
+    )
+
+    def _render_progress(written_frames: int, total_frames: int) -> None:
+        if total_frames <= 0:
+            return
+        fraction = min(1.0, max(0.0, float(written_frames) / float(total_frames)))
+        emit_progress(
+            progress_callback,
+            "rendering_full_zoom",
+            0.955 + (0.03 * fraction),
+            "Rendering full zoom movie",
+            {
+                "written_frames": int(written_frames),
+                "total_frames": int(total_frames),
+                "camera_mode": safe_mode,
+                "zoom_factor": round(float(zoom_factor), 3),
+                "output_path": out_path,
+            },
+        )
+
+    try:
+        return render_follow_cam_clip(
+            video_path=video_path,
+            output_path=out_path,
+            start_seconds=start_s,
+            end_seconds=end_s,
+            player_track=_trajectory_to_samples(player_traj, time_offset_seconds=track_time_offset_seconds),
+            ball_track=_trajectory_to_samples(ball_traj, time_offset_seconds=track_time_offset_seconds),
+            zoom_factor=zoom_factor,
+            ball_weight=ball_weight,
+            smooth_factor=0.24,
+            include_audio=True,
+            progress_callback=_render_progress,
+        )
+    except Exception as ex:
+        print(f"[warn] Failed to render full follow-cam movie ({start_s:.1f}s - {end_s:.1f}s): {ex}")
+        return None
+
+
 def draw_single_spotlight_overlay(video_path: str, traj: List[TrackPoint], interval: Tuple[float, float],
                                    clip_num: int, out_dir: str, radius: int = 35) -> Optional[str]:
     """Draw spotlight overlay for a single clip (used for parallel processing)"""
@@ -1327,6 +1389,7 @@ def process_video_highlights(
     analysis_only: bool = False,
     camera_mode: str = "wide",
     zoom_factor: float = 1.6,
+    render_full_follow_cam: bool = False,
     player_roi: Optional[Dict[str, float]] = None,
     yolo_model: str = "yolo26s.pt",
     tracker_config: str = "botsort.yaml",
@@ -1357,6 +1420,7 @@ def process_video_highlights(
         analysis_only: Run analysis/bookmark generation without writing highlight clips
         camera_mode: wide | follow_player | follow_action
         zoom_factor: Crop zoom level for follow-cam modes
+        render_full_follow_cam: Export one continuous zoomed follow-cam movie for the processed window/full source
         player_roi: Optional normalized/pixel ROI used to lock onto one player without an interactive popup
         yolo_model: Ultralytics detector weights used for player/ball tracking
         tracker_config: Ultralytics tracker config, usually botsort.yaml or bytetrack.yaml
@@ -1433,6 +1497,7 @@ def process_video_highlights(
     print(f"Camera mode: {camera_mode}")
     if camera_mode != "wide":
         print(f"Zoom factor: {zoom_factor:.2f}x")
+    print(f"Full follow-cam movie: {'Yes' if render_full_follow_cam else 'No'}")
     print(f"Detector: {yolo_model} | Tracker: {tracker_config} | imgsz={int(inference_imgsz)} | conf={float(detection_conf):.2f} | stride={int(vid_stride)}")
     print(f"Spotlight overlay: {'Yes' if overlay else 'No'}")
     print(f"Analysis-only mode: {'Yes' if analysis_only else 'No'}")
@@ -1579,6 +1644,7 @@ def process_video_highlights(
             "camera": {
                 "mode": camera_mode,
                 "zoom_factor": round(zoom_factor, 3),
+                "render_full_follow_cam": bool(render_full_follow_cam),
             },
             "detector": {
                 "yolo_model": yolo_model,
@@ -1634,6 +1700,7 @@ def process_video_highlights(
                 "audio_sensitivity": audio_sensitivity,
                 "camera_mode": camera_mode,
                 "zoom_factor": round(zoom_factor, 3),
+                "render_full_follow_cam": bool(render_full_follow_cam),
                 "no_audio": no_audio,
                 "overlay": overlay,
                 "threads": threads,
@@ -1689,20 +1756,54 @@ def process_video_highlights(
             {"analysis_manifest_path": manifest_path, "analysis_table_csv_path": csv_path, "bookmark_count": len(bookmarks)},
         )
 
-        if not intervals:
-            print("No highlight intervals found. Bookmark table generated for manual review.")
-            emit_progress(
-                progress_callback,
-                "completed" if analysis_only else "failed",
-                0.98,
-                "Analysis finished with no highlight clip intervals",
-            )
-            return bool(analysis_only)
-
         if analysis_only:
             print("[analysis] Analysis-only run complete. Skipped clip rendering.")
             emit_progress(progress_callback, "completed", 0.98, "Analysis-only run complete")
             return True
+
+        full_follow_cam_path: Optional[str] = None
+        if render_full_follow_cam:
+            if camera_mode == "wide":
+                print("[warn] Full follow-cam movie requested, but camera mode is wide. Skipping full zoom export.")
+            else:
+                full_interval = (float(trim_offset), float(trim_offset + video_duration))
+                emit_progress(
+                    progress_callback,
+                    "rendering_full_zoom",
+                    0.955,
+                    "Rendering full zoom movie",
+                    {
+                        "start_seconds": round(full_interval[0], 3),
+                        "end_seconds": round(full_interval[1], 3),
+                        "camera_mode": camera_mode,
+                        "zoom_factor": round(float(zoom_factor), 3),
+                    },
+                )
+                full_follow_cam_path = write_full_follow_cam_video(
+                    original_video,
+                    full_interval,
+                    output_dir,
+                    traj,
+                    ball_traj,
+                    camera_mode=camera_mode,
+                    zoom_factor=zoom_factor,
+                    track_time_offset_seconds=trim_offset,
+                    progress_callback=progress_callback,
+                )
+                emit_progress(
+                    progress_callback,
+                    "rendering_full_zoom",
+                    0.985,
+                    "Full zoom movie rendered" if full_follow_cam_path else "Full zoom movie render did not produce output",
+                    {"full_follow_cam_path": full_follow_cam_path or ""},
+                )
+
+        if not intervals:
+            print("No highlight intervals found. Bookmark table generated for manual review.")
+            if full_follow_cam_path:
+                return True
+            emit_progress(progress_callback, "failed", 0.98, "Analysis finished with no highlight clip intervals")
+            return False
 
         print("[5/5] Writing subclips...")
         emit_progress(progress_callback, "rendering", 0.95, "Rendering highlight clips")
@@ -1772,6 +1873,7 @@ def main():
     ap.add_argument("--analysis-only", action="store_true", help="Run detection/bookmark analysis without writing highlight clips")
     ap.add_argument("--camera-mode", choices=sorted(FOLLOW_CAM_MODES), default="wide", help="Video framing mode for rendered clips")
     ap.add_argument("--zoom-factor", type=float, default=1.6, help="Zoom factor for follow_player/follow_action camera modes")
+    ap.add_argument("--render-full-follow-cam", action="store_true", help="Also render one continuous zoomed follow-cam movie for the processed window/full source")
     args = ap.parse_args()
 
     # Interactive mode if video or output not provided
@@ -1876,6 +1978,7 @@ def main():
         analysis_only=args.analysis_only,
         camera_mode=args.camera_mode,
         zoom_factor=args.zoom_factor,
+        render_full_follow_cam=args.render_full_follow_cam,
     )
 
     if not success:

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import math
 import subprocess
+import time
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -12,6 +13,7 @@ from ..utils import ensure_dir
 
 TrackSample = Tuple[float, float, float]
 VideoCenter = Tuple[float, float]
+RenderProgressCallback = Callable[[int, int], None]
 
 
 def _import_cv2():
@@ -244,6 +246,7 @@ def _render_follow_cam_with_ffmpeg(
     frame_size: Tuple[int, int],
     zoom_factor: float,
     encoder: str,
+    progress_callback: Optional[RenderProgressCallback] = None,
 ) -> int:
     cv2 = _import_cv2()
     frame_w, frame_h = frame_size
@@ -283,6 +286,8 @@ def _render_follow_cam_with_ffmpeg(
         raise RuntimeError(f"Could not open video: {video_path}")
 
     written = 0
+    total_frames = len(centers)
+    last_progress_at = 0.0
     try:
         cap.set(cv2.CAP_PROP_POS_MSEC, start_seconds * 1000.0)
         for center in centers:
@@ -294,6 +299,11 @@ def _render_follow_cam_with_ffmpeg(
                 break
             process.stdin.write(zoomed.tobytes())
             written += 1
+            if progress_callback is not None:
+                now = time.monotonic()
+                if written == 1 or written >= total_frames or (now - last_progress_at) >= 2.0:
+                    progress_callback(written, total_frames)
+                    last_progress_at = now
     except Exception:
         process.kill()
         raise
@@ -322,6 +332,7 @@ def _render_follow_cam_with_opencv(
     fps: float,
     frame_size: Tuple[int, int],
     zoom_factor: float,
+    progress_callback: Optional[RenderProgressCallback] = None,
 ) -> int:
     cv2 = _import_cv2()
     frame_w, frame_h = frame_size
@@ -336,6 +347,8 @@ def _render_follow_cam_with_opencv(
         raise RuntimeError(f"Could not open follow-cam writer for: {output_path}")
 
     written = 0
+    total_frames = len(centers)
+    last_progress_at = 0.0
     try:
         for center in centers:
             ok, frame = cap.read()
@@ -343,6 +356,11 @@ def _render_follow_cam_with_opencv(
                 break
             writer.write(crop_frame_to_center(frame, center, zoom_factor, output_size=(frame_w, frame_h)))
             written += 1
+            if progress_callback is not None:
+                now = time.monotonic()
+                if written == 1 or written >= total_frames or (now - last_progress_at) >= 2.0:
+                    progress_callback(written, total_frames)
+                    last_progress_at = now
     finally:
         writer.release()
         cap.release()
@@ -358,6 +376,7 @@ def _render_follow_cam_video(
     fps: float,
     frame_size: Tuple[int, int],
     zoom_factor: float,
+    progress_callback: Optional[RenderProgressCallback] = None,
 ) -> Tuple[int, str]:
     for encoder in ("h264_nvenc", "libx264"):
         if not _ffmpeg_encoder_available(encoder):
@@ -373,6 +392,7 @@ def _render_follow_cam_video(
                 frame_size=frame_size,
                 zoom_factor=zoom_factor,
                 encoder=encoder,
+                progress_callback=progress_callback,
             )
             return written, encoder
         except Exception as exc:
@@ -387,6 +407,7 @@ def _render_follow_cam_video(
         fps=fps,
         frame_size=frame_size,
         zoom_factor=zoom_factor,
+        progress_callback=progress_callback,
     )
     return written, "mp4v"
 
@@ -402,6 +423,7 @@ def render_follow_cam_clip(
     ball_weight: float = 0.0,
     smooth_factor: float = 0.2,
     include_audio: bool = True,
+    progress_callback: Optional[RenderProgressCallback] = None,
 ) -> str:
     start_s = max(0.0, float(start_seconds))
     end_s = float(end_seconds)
@@ -445,6 +467,7 @@ def render_follow_cam_clip(
         fps=fps,
         frame_size=(frame_w, frame_h),
         zoom_factor=zoom_factor,
+        progress_callback=progress_callback,
     )
     print(f"[follow-cam] Encoded {written} frames with {encoder}")
 
