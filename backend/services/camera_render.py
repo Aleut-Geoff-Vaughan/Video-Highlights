@@ -19,9 +19,10 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import tempfile
 import time
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, IO, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -167,12 +168,12 @@ def annotate_zoomed_banner(frame: np.ndarray, decision: CameraDecision) -> np.nd
 
 
 def _open_ffmpeg_writer(output_path: Path, frame_size: Tuple[int, int], fps: float,
-                        encoder: str) -> subprocess.Popen:
+                        encoder: str, stderr_sink: IO[bytes]) -> subprocess.Popen:
     frame_w, frame_h = frame_size
     if encoder == "h264_nvenc":
         encoder_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "23"]
     else:
-        encoder_args = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "22"]
+        encoder_args = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"]
     cmd = [
         ffmpeg_exe(), "-y", "-hide_banner", "-loglevel", "error",
         "-f", "rawvideo", "-pix_fmt", "bgr24",
@@ -180,8 +181,11 @@ def _open_ffmpeg_writer(output_path: Path, frame_size: Tuple[int, int], fps: flo
         "-i", "pipe:0", "-an", *encoder_args,
         "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(output_path),
     ]
+    # stderr goes to a temp file, not a PIPE: on hour-long renders nothing
+    # drains stderr during the write loop, so a chatty encoder would fill the
+    # pipe buffer, block ffmpeg, and deadlock our stdin writes.
     return subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-                            stderr=subprocess.PIPE)
+                            stderr=stderr_sink)
 
 
 def _iter_encoders() -> List[str]:
@@ -257,41 +261,52 @@ def render_camera_plan_video(
         return cap
 
     total_frames = len(plan.decisions)
+
+    def _write_frames(frames: Iterable[np.ndarray], write_one: Callable[[np.ndarray], None]) -> int:
+        count = 0
+        last_emit = 0.0
+        for frame in frames:
+            write_one(frame)
+            count += 1
+            if progress_callback is not None:
+                now = time.monotonic()
+                if count == 1 or count >= total_frames or (now - last_emit) >= 2.0:
+                    progress_callback(count, total_frames)
+                    last_emit = now
+        return count
+
     written = 0
     encoder_used = ""
 
     for encoder in _iter_encoders():
         cap = _open_capture()
         temp_file.unlink(missing_ok=True)
-        process = _open_ffmpeg_writer(temp_file, (out_w, out_h), plan.fps, encoder)
-        written = 0
-        last_emit = 0.0
-        try:
-            for frame in _decorated_frames(cap):
-                if process.stdin is None:
-                    break
-                process.stdin.write(frame.tobytes())
-                written += 1
-                if progress_callback is not None:
-                    now = time.monotonic()
-                    if written == 1 or written >= total_frames or (now - last_emit) >= 2.0:
-                        progress_callback(written, total_frames)
-                        last_emit = now
-        except BrokenPipeError:
-            pass
-        except Exception:
-            process.kill()
-            cap.release()
-            raise
-        finally:
-            cap.release()
-            if process.stdin is not None:
-                try:
-                    process.stdin.close()
-                except OSError:
-                    pass
-        stderr = process.stderr.read().decode("utf-8", errors="ignore") if process.stderr else ""
-        code = process.wait()
+        with tempfile.TemporaryFile() as stderr_sink:
+            process = _open_ffmpeg_writer(temp_file, (out_w, out_h), plan.fps, encoder, stderr_sink)
+            written = 0
+            try:
+                if process.stdin is not None:
+                    written = _write_frames(
+                        _decorated_frames(cap),
+                        lambda frame: process.stdin.write(frame.tobytes()),
+                    )
+            except BrokenPipeError:
+                pass
+            except Exception:
+                process.kill()
+                process.wait()
+                cap.release()
+                raise
+            finally:
+                cap.release()
+                if process.stdin is not None:
+                    try:
+                        process.stdin.close()
+                    except OSError:
+                        pass
+            code = process.wait()
+            stderr_sink.seek(0)
+            stderr = stderr_sink.read().decode("utf-8", errors="ignore")
         if code == 0 and written > 0 and temp_file.exists() and temp_file.stat().st_size > 0:
             encoder_used = encoder
             break
@@ -306,17 +321,8 @@ def render_camera_plan_video(
         if not writer.isOpened():
             cap.release()
             raise RuntimeError(f"Could not open video writer for: {temp_file}")
-        written = 0
-        last_emit = 0.0
         try:
-            for frame in _decorated_frames(cap):
-                writer.write(frame)
-                written += 1
-                if progress_callback is not None:
-                    now = time.monotonic()
-                    if written == 1 or written >= total_frames or (now - last_emit) >= 2.0:
-                        progress_callback(written, total_frames)
-                        last_emit = now
+            written = _write_frames(_decorated_frames(cap), writer.write)
         finally:
             writer.release()
             cap.release()

@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import subprocess
 import time
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Sequence, Tuple
 
@@ -14,6 +15,19 @@ from ..utils import ensure_dir
 TrackSample = Tuple[float, float, float]
 VideoCenter = Tuple[float, float]
 RenderProgressCallback = Callable[[int, int], None]
+
+# How strongly each camera mode weights the ball vs the player track when
+# blending the legacy follow-cam focus point. Shared by the pipeline and the
+# API event-clip renderer so the policy cannot drift between them.
+CAMERA_MODE_BALL_WEIGHTS = {
+    "follow_player": 0.0,
+    "follow_action": 0.35,
+    "follow_ball": 1.0,
+}
+
+
+def ball_weight_for_mode(camera_mode: str) -> float:
+    return CAMERA_MODE_BALL_WEIGHTS.get(str(camera_mode or "").strip().lower(), 0.0)
 
 
 def _import_cv2():
@@ -224,7 +238,10 @@ def _mux_audio(
     return result.returncode == 0 and Path(output_path).exists() and Path(output_path).stat().st_size > 0
 
 
+@lru_cache(maxsize=None)
 def _ffmpeg_encoder_available(encoder: str) -> bool:
+    # Cached: availability cannot change mid-process, and probing spawns an
+    # ffmpeg subprocess that would otherwise run once per rendered clip.
     if not ffmpeg_available():
         return False
     result = subprocess.run(

@@ -2904,7 +2904,7 @@ def _render_studio_editor(
         )
 
         cam_col1, cam_col2 = st.columns([1.0, 1.0])
-        camera_options = ["follow_action", "follow_player", "wide"]
+        camera_options = ["follow_action", "follow_player", "follow_ball", "wide"]
         current_camera = str(latest_config.get("camera_mode") or "follow_action")
         if current_camera not in camera_options:
             current_camera = "follow_action"
@@ -4246,10 +4246,10 @@ elif nav_key == "New Processing Run":
                 out_col1, out_col2, out_col3 = st.columns(3)
                 camera_mode = out_col1.selectbox(
                     "Camera Mode",
-                    ["follow_action", "follow_player", "wide"],
+                    ["follow_action", "follow_player", "follow_ball", "wide"],
                     index=0,
                     key="portal_new_camera_mode",
-                    help="`follow_action` keeps the tracked player central while nudging toward nearby ball action.",
+                    help="`follow_action` follows the tracked player with a nudge toward the ball; `follow_ball` is the game camera that tracks the ball itself.",
                 )
                 zoom_factor = out_col2.slider("Zoom Factor", 1.0, 3.0, 1.8, 0.1, key="portal_new_zoom_factor")
                 require_gpu = out_col3.checkbox(
@@ -4513,7 +4513,7 @@ elif nav_key == "New Processing Run":
                 rerun_default_camera = str(source_config.get("camera_mode") or "follow_action")
                 if rerun_default_camera == "wide":
                     rerun_default_camera = "follow_action"
-                if rerun_default_camera not in {"wide", "follow_action", "follow_player"}:
+                if rerun_default_camera not in {"wide", "follow_action", "follow_player", "follow_ball"}:
                     rerun_default_camera = "follow_action"
                 rerun_default_zoom = max(1.8, _bounded_float(source_config.get("zoom_factor", 1.8), 1.8, 1.0, 3.0))
                 if st.session_state.get("portal_rerun_zoom_defaults_job_id") != source_job["job_id"]:
@@ -4537,7 +4537,7 @@ elif nav_key == "New Processing Run":
                     key="portal_rerun_log_profile",
                     help="Detailed logs are useful while validating reruns. Diagnostic captures deeper raw config checkpoints.",
                 ).lower()
-                rerun_camera_options = ["follow_action", "follow_player", "wide"]
+                rerun_camera_options = ["follow_action", "follow_player", "follow_ball", "wide"]
                 source_camera_mode = rerun_default_camera
                 if source_camera_mode not in rerun_camera_options:
                     source_camera_mode = "follow_action"
@@ -5072,7 +5072,7 @@ elif nav_key == "Game Library":
                     "trim_end": None,
                     "label": _format_trim_window(latest_config),
                 }
-                camera_mode_options = ["follow_action", "follow_player", "wide"]
+                camera_mode_options = ["follow_action", "follow_player", "follow_ball", "wide"]
                 current_camera_mode = str(latest_config.get("camera_mode") or "follow_action")
                 if current_camera_mode == "wide":
                     current_camera_mode = "follow_action"

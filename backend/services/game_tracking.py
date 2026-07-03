@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -61,6 +61,11 @@ class BallTrackConfig:
     max_speed_frame_widths_per_s: float = 2.2
     # Base association gate in pixels (grows with elapsed time).
     base_gate_px: float = 80.0
+    # Cap on the association gate as a fraction of the frame width. Without
+    # a cap, the gate outgrows the frame after ~0.4s of detector dropout and
+    # a single false positive (scoreboard, spare ball) teleports the track;
+    # gaps longer than this are handled by the re-acquisition path instead.
+    max_gate_frac: float = 0.35
     # A fresh/re-acquired track is confirmed once this many mutually
     # consistent detections land inside a short window.
     confirm_detections: int = 2
@@ -138,10 +143,12 @@ class BallTrack:
         """
         if len(self) < 2:
             return 0.0, 0.0
-        idxs = np.where((self.times >= t - window_s) & (self.times <= t + window_s))[0]
-        if len(idxs) < 2:
+        # searchsorted keeps this O(log n); it is called once per planned
+        # frame, so a linear scan here would make the planner O(n^2).
+        first = int(np.searchsorted(self.times, t - window_s, side="left"))
+        last = int(np.searchsorted(self.times, t + window_s, side="right")) - 1
+        if last - first < 1:
             return 0.0, 0.0
-        first, last = int(idxs[0]), int(idxs[-1])
         dt = float(self.times[last] - self.times[first])
         if dt <= 1e-6:
             return 0.0, 0.0
@@ -278,7 +285,7 @@ def build_ball_track(
         # predicted point off-screen.
         pred_dt = min(dt, 0.5)
         pred = (pos[0] + vel[0] * pred_dt, pos[1] + vel[1] * pred_dt)
-        gate = cfg.base_gate_px + speed_limit * dt
+        gate = min(cfg.base_gate_px + speed_limit * dt, cfg.max_gate_frac * frame_w)
 
         best = min(group, key=lambda row: math.hypot(row[1] - pred[0], row[2] - pred[1]))
         dist = math.hypot(best[1] - pred[0], best[2] - pred[1])
@@ -553,6 +560,20 @@ class GameStateConfig:
     kickoff_center_frac: float = 0.16
     kickoff_search_s: float = 45.0
     min_shot_speed_frame_widths_per_s: float = 0.25
+    # Minimum x-velocity (px/s) that counts as the ball entering a goal.
+    goal_entry_speed_px_s: float = 20.0
+    # Goal candidates on the same side within this window merge into one.
+    goal_merge_window_s: float = 6.0
+    # How far ahead a vanishing ball's path is extrapolated to the goal line.
+    goal_extrapolation_s: float = 0.8
+    # Consecutive in-goal sightings further apart than this start a new run.
+    goal_run_gap_s: float = 1.5
+    # Margin around the estimated goal mouth (posts): max of these two.
+    goal_mouth_margin_px: float = 12.0
+    goal_mouth_margin_frac: float = 0.25
+    # Goal events below this confidence are dropped (e.g. a ball that merely
+    # vanishes near a goal as the recording ends).
+    min_goal_confidence: float = 0.65
 
 
 @dataclass
@@ -613,25 +634,32 @@ def detect_goal_events(
     def _mouth_y_range(goal: GoalBox) -> Tuple[float, float]:
         # The goal-mouth y estimate can be a bit off; allow a forgiving
         # margin around the posts.
-        margin = max(12.0, abs(goal.y2 - goal.y1) * 0.25)
+        margin = max(cfg.goal_mouth_margin_px, abs(goal.y2 - goal.y1) * cfg.goal_mouth_margin_frac)
         return goal.y1 - margin, goal.y2 + margin
 
+    # Visibility gaps are shared by signals 2 and 3; compute once.
+    all_gaps = ball_track.visibility_gaps(start_s, end_s)
+    track_end_t = float(ball_track.times[-1]) if len(ball_track) else start_s
+
     def _reappears_near_center(after_t: float) -> Optional[float]:
-        mask = (ball_track.times > after_t) & (ball_track.times <= after_t + cfg.kickoff_search_s)
-        idxs = np.where(mask)[0]
-        for i in idxs:
-            dx = float(ball_track.xs[i]) - center_x
-            dy = float(ball_track.ys[i]) - center_y
-            if math.hypot(dx, dy) <= kickoff_radius:
-                return float(ball_track.times[i])
-        return None
+        first = int(np.searchsorted(ball_track.times, after_t, side="right"))
+        last = int(np.searchsorted(ball_track.times, after_t + cfg.kickoff_search_s, side="right"))
+        if last <= first:
+            return None
+        dists = np.hypot(
+            ball_track.xs[first:last] - center_x, ball_track.ys[first:last] - center_y
+        )
+        hits = np.flatnonzero(dists <= kickoff_radius)
+        if len(hits) == 0:
+            return None
+        return float(ball_track.times[first + int(hits[0])])
 
     def _add_event(t: float, side: str, confidence: float, reason: str, evidence: Dict[str, object]) -> None:
         # Merge with an existing event on the same side within a few seconds.
         # Evidence accumulates across signals (booleans OR together), and two
         # independent corroborating signals raise confidence slightly.
         for existing in events:
-            if existing.side == side and abs(existing.t - t) < 6.0:
+            if existing.side == side and abs(existing.t - t) < cfg.goal_merge_window_s:
                 merged = dict(existing.evidence)
                 for key, value in evidence.items():
                     if isinstance(value, bool):
@@ -659,7 +687,8 @@ def detect_goal_events(
         """
         t_first = float(ball_track.times[first_idx])
         vx, _vy = ball_track.velocity_at(t_first, window_s=0.5)
-        into_goal = vx < -20.0 if goal.side == "left" else vx > 20.0
+        gate = cfg.goal_entry_speed_px_s
+        into_goal = vx < -gate if goal.side == "left" else vx > gate
         if into_goal:
             return True
         # Slow/stationary ball in the net: accept if it was visible on the
@@ -688,7 +717,7 @@ def detect_goal_events(
         run_start = idxs[0]
         prev = idxs[0]
         for i in idxs[1:]:
-            if float(ball_track.times[i] - ball_track.times[prev]) > 1.5:
+            if float(ball_track.times[i] - ball_track.times[prev]) > cfg.goal_run_gap_s:
                 runs.append((run_start, prev))
                 run_start = i
             prev = i
@@ -719,21 +748,20 @@ def detect_goal_events(
     # Signal 2: ball observed crossing the goal line between the posts (also
     # catches shots that skip past the shallow goal box between frames).
     if len(ball_track) >= 2:
+        xs, ys, times = ball_track.xs, ball_track.ys, ball_track.times
+        dts = np.diff(times)
         for goal in (geometry.left_goal, geometry.right_goal):
             line_x = _goal_line_x(goal)
             mouth_y1, mouth_y2 = _mouth_y_range(goal)
-            xs, ys, times = ball_track.xs, ball_track.ys, ball_track.times
-            for i in range(len(ball_track) - 1):
+            if goal.side == "left":
+                crossed = (xs[:-1] >= line_x) & (xs[1:] < line_x)
+            else:
+                crossed = (xs[:-1] <= line_x) & (xs[1:] > line_x)
+            crossed &= dts <= 0.5
+            crossed &= (times[1:] >= start_s) & (times[:-1] <= end_s)
+            for i in np.flatnonzero(crossed):
                 t0, t1 = float(times[i]), float(times[i + 1])
-                if t1 < start_s or t0 > end_s or (t1 - t0) > 0.5:
-                    continue
                 x0, x1p = float(xs[i]), float(xs[i + 1])
-                if goal.side == "left":
-                    crossed = x0 >= line_x > x1p
-                else:
-                    crossed = x0 <= line_x < x1p
-                if not crossed:
-                    continue
                 span = x1p - x0
                 alpha = (line_x - x0) / span if abs(span) > 1e-6 else 0.0
                 y_cross = float(ys[i]) + (float(ys[i + 1]) - float(ys[i])) * alpha
@@ -748,8 +776,11 @@ def detect_goal_events(
                     "goal_line_x": round(line_x, 1),
                 }
                 reason = f"ball observed crossing the {goal.side} goal line between the posts"
-                gaps_after = ball_track.visibility_gaps(t_cross, min(end_s, t_cross + 6.0))
-                if any(gap_end - gap_start >= cfg.goal_disappear_confirm_s for gap_start, gap_end in gaps_after):
+                if any(
+                    gap_end > t_cross and gap_start < t_cross + 6.0
+                    and (gap_end - gap_start) >= cfg.goal_disappear_confirm_s
+                    for gap_start, gap_end in all_gaps
+                ):
                     confidence += 0.1
                     reason += "; ball out of sight afterwards"
                 kickoff_t = _reappears_near_center(t_cross + 0.5)
@@ -760,9 +791,13 @@ def detect_goal_events(
                 _add_event(t_cross, goal.side, min(0.98, confidence), reason, evidence)
 
     # Signal 3: ball vanishes while heading into a goal mouth.
-    for gap_start, gap_end in ball_track.visibility_gaps(start_s, end_s):
+    for gap_start, gap_end in all_gaps:
         if gap_start <= float(ball_track.times[0]):
             continue
+        # A gap that runs to the end of the window (recording stopped, keeper
+        # held the ball) is weak evidence: no disappearance bonus, and with no
+        # kickoff possible the event usually falls below min_goal_confidence.
+        is_trailing_gap = gap_start >= track_end_t - 1e-6
         last = ball_track.position_at(gap_start)
         if last is None:
             continue
@@ -793,7 +828,7 @@ def detect_goal_events(
                 "disappeared_for_s": round(gap_len, 3),
             }
             reason = f"ball vanished heading into {goal.side} goal mouth"
-            if gap_len >= cfg.goal_disappear_confirm_s:
+            if gap_len >= cfg.goal_disappear_confirm_s and not is_trailing_gap:
                 confidence += 0.15
                 reason += f"; stayed out of sight {gap_len:.1f}s"
             kickoff_t = _reappears_near_center(gap_end - 0.1)
@@ -803,11 +838,18 @@ def detect_goal_events(
                 reason += "; kickoff restart observed"
             _add_event(gap_start, goal.side, min(0.98, confidence), reason, evidence)
 
-    events.sort(key=lambda e: e.t)
-    for event in events:
+    kept: List[GoalEvent] = []
+    for event in sorted(events, key=lambda e: e.t):
+        if event.confidence < cfg.min_goal_confidence:
+            LOGGER.info(
+                "goal candidate dropped (confidence %.2f < %.2f): t=%.2fs side=%s (%s)",
+                event.confidence, cfg.min_goal_confidence, event.t, event.side, event.reason,
+            )
+            continue
         LOGGER.info("goal flagged: t=%.2fs side=%s confidence=%.2f (%s)",
                     event.t, event.side, event.confidence, event.reason)
-    return events
+        kept.append(event)
+    return kept
 
 
 # ---------------------------------------------------------------------------

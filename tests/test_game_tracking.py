@@ -75,6 +75,24 @@ def test_build_ball_track_interpolates_short_gaps_only() -> None:
     assert any(start <= 1.1 and end >= 4.9 for start, end in gaps)
 
 
+def test_build_ball_track_rejects_outlier_after_detector_dropout() -> None:
+    """The association gate must stay bounded during detection gaps: after a
+    ~0.6s dropout a single far-away false positive (scoreboard) must not
+    capture the track away from the real ball."""
+    detections = _linear_detections(0.0, 2.0, 380.0, 400.0, 500.0)
+    detections.append((2.6, 1900.0, 40.0))  # scoreboard flash mid-dropout
+    detections += _linear_detections(2.7, 3.5, 402.0, 410.0, 500.0)
+
+    track = build_ball_track(detections, FRAME)
+
+    pos = track.position_at(2.6)
+    assert pos is not None
+    assert pos[0] < 600.0, f"track teleported to the outlier: {pos}"
+    late = track.position_at(3.2)
+    assert late is not None
+    assert abs(late[0] - 406.0) < 40.0
+
+
 def test_build_ball_track_reacquires_after_silence() -> None:
     detections = _linear_detections(0.0, 2.0, 300.0, 400.0, 500.0)
     # 2s silence, ball re-appears on the other wing.
@@ -214,6 +232,20 @@ def test_goal_flagged_when_ball_vanishes_into_goal_mouth_and_kickoff_follows() -
     assert events[0].side == "right"
     assert "kickoff_reappearance_s" in events[0].evidence
     assert events[0].confidence >= 0.8
+
+
+def test_no_goal_when_ball_vanishes_near_goal_as_recording_ends() -> None:
+    """A keeper catch / recording cut right after motion toward the goal must
+    not be flagged: the trailing visibility gap earns no disappearance bonus
+    and the event falls below the confidence floor."""
+    geometry = estimate_field_geometry(_player_cloud(), FRAME)
+    gy = geometry.right_goal.center[1]
+    detections = _linear_detections(0.0, 1.0, 1100.0, geometry.x_max - 60.0, gy, hz=20.0)
+    track = build_ball_track(detections, FRAME)
+
+    # Window extends well past the last sighting with no kickoff ever seen.
+    events = detect_goal_events(track, geometry, 0.0, 30.0)
+    assert events == []
 
 
 def test_no_goal_for_shot_wide_of_the_posts() -> None:

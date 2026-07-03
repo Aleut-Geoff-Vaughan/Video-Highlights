@@ -54,6 +54,7 @@ import csv
 import json
 import logging
 import subprocess
+import threading
 import time
 from datetime import datetime, timezone
 from dataclasses import dataclass
@@ -65,22 +66,18 @@ import numpy as np
 import cv2
 from tqdm import tqdm
 
-from backend.services.follow_cam import render_follow_cam_clip
+from backend.services.follow_cam import ball_weight_for_mode, render_follow_cam_clip
 from backend.services.player_focus import (
     choose_target_track_id,
     resolve_player_roi_box,
     stitch_target_track,
 )
 from backend.services.game_tracking import (
-    BallTrack,
     FieldGeometry,
-    GameStateSegment,
-    GoalEvent,
     analyze_game_states,
     build_ball_track,
     detect_goal_events,
     estimate_field_geometry,
-    state_at,
     summarize_states,
 )
 from backend.services.camera_planner import CameraPlan, plan_camera, slice_plan
@@ -88,37 +85,82 @@ from backend.services.camera_render import render_camera_plan_video
 
 LOGGER = logging.getLogger("videohighlights")
 
+_LOGGING_LOCK = threading.Lock()
 
-def setup_logging(debug: bool = False, log_file: Optional[str] = None) -> None:
-    """Configure pipeline logging.
 
-    ``debug=True`` prints every [debug]-level diagnostic to the console.
+class _CurrentStdout:
+    """File-like proxy that always writes to the *current* sys.stdout.
+
+    The GUI redirects sys.stdout to a fresh StringIO per run; binding the
+    console handler to this proxy (instead of a snapshot of sys.stdout)
+    keeps log output flowing to whatever stdout is active.
+    """
+
+    def write(self, text: str) -> int:
+        return sys.stdout.write(text)
+
+    def flush(self) -> None:
+        try:
+            sys.stdout.flush()
+        except Exception:
+            pass
+
+
+def setup_logging(debug: bool = False, log_file: Optional[str] = None) -> Optional[logging.Handler]:
+    """Configure pipeline logging for one run.
+
+    ``debug=True`` prints every debug-level diagnostic to the console.
     ``log_file`` additionally captures the full DEBUG stream (with
     timestamps) regardless of the console level - useful for reviewing a run
     and for building training datasets.
+
+    The console handler is created once and only its level is adjusted, and
+    the per-run file handler is RETURNED so the caller can detach it when the
+    run finishes (see :func:`teardown_run_logging`). Never removes handlers
+    it did not create - concurrent jobs in one process (API worker threads)
+    must not strip each other's log files mid-run.
     """
-    root = logging.getLogger("videohighlights")
-    root.setLevel(logging.DEBUG)
-    # Reset handlers so repeated runs (GUI / API worker) don't duplicate output.
-    for handler in list(root.handlers):
-        root.removeHandler(handler)
+    with _LOGGING_LOCK:
+        root = logging.getLogger("videohighlights")
+        root.setLevel(logging.DEBUG)
+        root.propagate = False
 
-    console = logging.StreamHandler(sys.stdout)
-    console.setLevel(logging.DEBUG if debug else logging.INFO)
-    console.setFormatter(logging.Formatter("[%(levelname).1s] %(message)s"))
-    root.addHandler(console)
-
-    if log_file:
-        log_dir = os.path.dirname(os.path.abspath(log_file))
-        if log_dir:
-            os.makedirs(log_dir, exist_ok=True)
-        file_handler = logging.FileHandler(log_file, mode="w", encoding="utf-8")
-        file_handler.setLevel(logging.DEBUG)
-        file_handler.setFormatter(
-            logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+        console = next(
+            (h for h in root.handlers if getattr(h, "_vh_console", False)), None
         )
-        root.addHandler(file_handler)
-    root.propagate = False
+        if console is None:
+            console = logging.StreamHandler(_CurrentStdout())
+            console._vh_console = True  # type: ignore[attr-defined]
+            console.setFormatter(logging.Formatter("[%(levelname).1s] %(message)s"))
+            root.addHandler(console)
+        console.setLevel(logging.DEBUG if debug else logging.INFO)
+
+        file_handler: Optional[logging.Handler] = None
+        if log_file:
+            log_dir = os.path.dirname(os.path.abspath(log_file))
+            if log_dir:
+                os.makedirs(log_dir, exist_ok=True)
+            file_handler = logging.FileHandler(log_file, mode="w", encoding="utf-8")
+            file_handler.setLevel(logging.DEBUG)
+            file_handler.setFormatter(
+                logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+            )
+            root.addHandler(file_handler)
+        return file_handler
+
+
+def teardown_run_logging(file_handler: Optional[logging.Handler]) -> None:
+    """Detach and close a run's file handler (prevents fd leaks and, on
+    Windows, lingering locks on the output directory)."""
+    if file_handler is None:
+        return
+    with _LOGGING_LOCK:
+        root = logging.getLogger("videohighlights")
+        root.removeHandler(file_handler)
+        try:
+            file_handler.close()
+        except Exception:
+            pass
 
 
 # --- Optional heavy dependencies (loaded lazily so this module can be
@@ -465,8 +507,12 @@ def build_analysis_bookmarks(
         }
 
         # Ball-tracking goal detection overrides the heuristic event type:
-        # a flagged goal inside this interval makes it a goal bookmark.
+        # a flagged goal inside this interval makes it a goal bookmark. A
+        # goal-only interval (no motion/audio overlap) must not carry the
+        # default "motion" source label - its evidence is the ball track.
         goal_row = _goal_within(start_s, end_s)
+        if goal_row is not None and not has_speed_signal and not has_audio_signal:
+            sources = []
         if goal_row is not None:
             event_type = "goal"
             label = "goal_detected"
@@ -649,7 +695,12 @@ def track_video(
     # The stream=True iterator yields per-frame results with .boxes and .boxes.id
     tracks: Dict[int, List[TrackPoint]] = {}
     ball_trajectory: List[TrackPoint] = []
-    all_player_positions: List[Tuple[float, float, float]] = []  # (t, x, y) for every person box
+    # All-player positions feed field-geometry percentiles and 0.5s-binned
+    # action centroids; both are insensitive to subsampling, so cap the
+    # collection rate at ~10Hz (an hour of 60fps x 20 players would otherwise
+    # hold millions of tuples in memory for the whole run).
+    all_player_positions: List[Tuple[float, float, float]] = []
+    player_pos_keep_every = max(1, int(round((fps / max(1, stride)) / 10.0)))
     last_progress_emit = 0.0
 
     for frame_idx, result in enumerate(
@@ -701,7 +752,8 @@ def track_video(
             cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
 
             if c == 0:  # person
-                all_player_positions.append((t, float(cx), float(cy)))
+                if frame_idx % player_pos_keep_every == 0:
+                    all_player_positions.append((t, float(cx), float(cy)))
                 tracks.setdefault(track_id, []).append(
                     TrackPoint(
                         t=t,
@@ -771,9 +823,9 @@ def track_video(
             "stitched_track_ids": stitched_track_ids,
             "stitched_track_count": len(stitched_track_ids),
             "player_positions": (
-                np.asarray(all_player_positions, dtype=np.float64)
+                np.asarray(all_player_positions, dtype=np.float32)
                 if all_player_positions
-                else np.empty((0, 3), dtype=np.float64)
+                else np.empty((0, 3), dtype=np.float32)
             ),
         },
     )
@@ -921,7 +973,14 @@ def detect_highlights_from_speed(times: np.ndarray, speed: np.ndarray, pre: floa
 
 def detect_audio_peaks(video_path: str, pre: float, post: float, k: float = 2.0) -> List[Tuple[float, float]]:
     try:
-        import librosa  # Lazy: audio analysis is optional at runtime
+        try:
+            import librosa  # Lazy: audio analysis is optional at runtime
+        except ImportError:
+            print(
+                "[warn] librosa is not installed - audio peak detection disabled. "
+                "Install with: pip install librosa soundfile"
+            )
+            return []
 
         # Load audio at native sampling rate
         y, sr = librosa.load(video_path, sr=None, mono=True)
@@ -1269,7 +1328,7 @@ def write_single_follow_cam_subclip(
 ) -> Optional[str]:
     s, e = interval
     out_path = os.path.join(out_dir, f"highlight_{clip_num:02d}.mp4")
-    ball_weight = 0.35 if camera_mode == "follow_action" else 0.0
+    ball_weight = ball_weight_for_mode(camera_mode)
     try:
         return render_follow_cam_clip(
             video_path=video_path,
@@ -1346,35 +1405,51 @@ def write_follow_ball_subclips(
     out_dir: str,
     camera_plan: CameraPlan,
     field_geometry: FieldGeometry,
-    overlay_banner: bool = False,
+    max_workers: Optional[int] = None,
 ) -> List[str]:
     """Render highlight clips from the game-centric camera plan.
 
     Intervals are in the processing-video timebase (matching the plan).
-    Rendering is sequential: each clip decodes from the same source and the
-    ffmpeg pipe already saturates I/O, so parallelism buys nothing here.
+    Decode + crop runs in Python threads while encoding happens in separate
+    ffmpeg processes, so a small pool scales nearly linearly (same policy as
+    the legacy follow-cam clip writer).
     """
-    print(f"[follow-ball] Writing {len(intervals)} clips from the game camera plan")
-    paths: List[str] = []
-    for clip_num, (s, e) in enumerate(tqdm(intervals, desc="Writing follow-ball clips", unit="clip"), start=1):
+    if max_workers is None:
+        max_workers = max(1, min(3, int(multiprocessing.cpu_count() * 0.33)))
+    else:
+        max_workers = max(1, min(int(max_workers), 4))
+    print(f"[follow-ball] Writing {len(intervals)} clips from the game camera plan ({max_workers} workers)")
+
+    def _render_one(clip_num: int, s: float, e: float) -> Optional[str]:
         out_path = os.path.join(out_dir, f"highlight_{clip_num:02d}.mp4")
         try:
             sub_plan = slice_plan(camera_plan, s, e)
             if len(sub_plan) == 0:
                 print(f"[warn] Follow-ball clip {clip_num} has no planned frames ({s:.1f}s - {e:.1f}s)")
-                continue
-            paths.append(
-                render_camera_plan_video(
-                    video_path=processing_video,
-                    output_path=out_path,
-                    plan=sub_plan,
-                    include_audio=True,
-                    overlay_banner=overlay_banner,
-                    geometry=field_geometry,
-                )
+                return None
+            return render_camera_plan_video(
+                video_path=processing_video,
+                output_path=out_path,
+                plan=sub_plan,
+                include_audio=True,
+                geometry=field_geometry,
             )
         except Exception as ex:
             print(f"[warn] Failed to write follow-ball clip {clip_num} ({s:.1f}s - {e:.1f}s): {ex}")
+            return None
+
+    paths: List[str] = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(_render_one, clip_num, s, e): clip_num
+            for clip_num, (s, e) in enumerate(intervals, start=1)
+        }
+        with tqdm(total=len(intervals), desc="Writing follow-ball clips", unit="clip") as pbar:
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    paths.append(result)
+                pbar.update(1)
     paths.sort()
     return paths
 
@@ -1397,7 +1472,7 @@ def write_full_follow_cam_video(
 
     safe_mode = str(camera_mode or "follow_action").strip().lower()
     out_path = os.path.join(out_dir, f"full_{safe_mode}_zoom.mp4")
-    ball_weight = 0.35 if safe_mode == "follow_action" else 0.0
+    ball_weight = ball_weight_for_mode(safe_mode)
     duration_s = float(end_s - start_s)
     print(
         f"[follow-cam] Rendering full zoom movie: {format_time(start_s)} - {format_time(end_s)} "
@@ -1591,6 +1666,119 @@ def process_video_highlights(
     goal_box_left: Optional[Dict[str, float]] = None,
     goal_box_right: Optional[Dict[str, float]] = None,
 ) -> bool:
+    """Public pipeline entry point used by the CLI, GUI, and API worker.
+
+    Configures per-run logging, then delegates to the implementation; the
+    run's log-file handler is always detached and closed on exit so
+    long-lived host processes do not leak file descriptors.
+    """
+    run_log_handler = setup_logging(debug=debug, log_file=log_file)
+    try:
+        return _process_video_highlights_impl(
+            video_path=video_path,
+            output_dir=output_dir,
+            select_player=select_player,
+            pre_seconds=pre_seconds,
+            post_seconds=post_seconds,
+            min_clip_duration=min_clip_duration,
+            no_audio=no_audio,
+            overlay=overlay,
+            trim_start=trim_start,
+            trim_end=trim_end,
+            threads=threads,
+            require_gpu=require_gpu,
+            speed_sensitivity=speed_sensitivity,
+            audio_sensitivity=audio_sensitivity,
+            focus_event_types=focus_event_types,
+            model_version=model_version,
+            analysis_only=analysis_only,
+            camera_mode=camera_mode,
+            zoom_factor=zoom_factor,
+            render_full_follow_cam=render_full_follow_cam,
+            player_roi=player_roi,
+            yolo_model=yolo_model,
+            tracker_config=tracker_config,
+            inference_imgsz=inference_imgsz,
+            detection_conf=detection_conf,
+            vid_stride=vid_stride,
+            progress_callback=progress_callback,
+            debug=debug,
+            log_file=log_file,
+            debug_video=debug_video,
+            dump_training_data=dump_training_data,
+            goal_box_left=goal_box_left,
+            goal_box_right=goal_box_right,
+        )
+    finally:
+        teardown_run_logging(run_log_handler)
+
+
+def _preflight_dependencies(camera_mode: str, analysis_only: bool, no_audio: bool) -> Optional[str]:
+    """Check optional heavy dependencies BEFORE any expensive work.
+
+    Returns an error message when the run cannot possibly succeed; prints
+    warnings for degradations (skipped montage, disabled audio detection).
+    """
+    import importlib.util
+
+    if importlib.util.find_spec("ultralytics") is None:
+        return (
+            "ultralytics is not installed - player/ball tracking cannot run. "
+            "Install with: pip install ultralytics"
+        )
+    if not analysis_only and importlib.util.find_spec("moviepy") is None:
+        if camera_mode == "wide":
+            return (
+                "moviepy is not installed - wide-mode highlight clips cannot be rendered. "
+                "Install with: pip install moviepy (or use a follow camera mode)"
+            )
+        print(
+            "[warn] moviepy is not installed: highlight clips will render, "
+            "but the montage will be skipped. Install with: pip install moviepy"
+        )
+    if not no_audio and importlib.util.find_spec("librosa") is None:
+        print(
+            "[warn] librosa is not installed: audio peak detection is disabled. "
+            "Install with: pip install librosa soundfile"
+        )
+    return None
+
+
+def _process_video_highlights_impl(
+    video_path: str,
+    output_dir: str,
+    select_player: bool = False,
+    pre_seconds: float = 2.0,
+    post_seconds: float = 6.0,
+    min_clip_duration: float = 4.0,
+    no_audio: bool = False,
+    overlay: bool = False,
+    trim_start: Optional[float] = None,
+    trim_end: Optional[float] = None,
+    threads: Optional[int] = None,
+    require_gpu: bool = False,
+    speed_sensitivity: float = 2.0,
+    audio_sensitivity: float = 2.0,
+    focus_event_types: Optional[List[str]] = None,
+    model_version: Optional[str] = None,
+    analysis_only: bool = False,
+    camera_mode: str = "wide",
+    zoom_factor: float = 1.6,
+    render_full_follow_cam: bool = False,
+    player_roi: Optional[Dict[str, float]] = None,
+    yolo_model: str = "yolo26s.pt",
+    tracker_config: str = "botsort.yaml",
+    inference_imgsz: int = 960,
+    detection_conf: float = 0.18,
+    vid_stride: int = 1,
+    progress_callback: Optional[ProgressCallback] = None,
+    debug: bool = False,
+    log_file: Optional[str] = None,
+    debug_video: bool = False,
+    dump_training_data: bool = False,
+    goal_box_left: Optional[Dict[str, float]] = None,
+    goal_box_right: Optional[Dict[str, float]] = None,
+) -> bool:
     """
     Core video highlights processing function.
     This function is used by both CLI and GUI interfaces.
@@ -1633,8 +1821,6 @@ def process_video_highlights(
     Returns:
         True if processing succeeded, False otherwise
     """
-    setup_logging(debug=debug, log_file=log_file)
-
     # Check GPU requirement
     emit_progress(progress_callback, "initializing", 0.02, "Validating runtime and GPU requirements")
     if require_gpu:
@@ -1669,6 +1855,15 @@ def process_video_highlights(
         emit_progress(progress_callback, "failed", 1.0, "Unsupported camera mode")
         return False
     zoom_factor = max(1.0, float(zoom_factor or 1.0))
+
+    # Fail fast on missing dependencies BEFORE trimming/tracking, with an
+    # actionable message (a missing package used to surface hours in, or
+    # silently degrade the run).
+    preflight_error = _preflight_dependencies(camera_mode, analysis_only, no_audio)
+    if preflight_error:
+        print(f"ERROR: {preflight_error}")
+        emit_progress(progress_callback, "failed", 1.0, preflight_error)
+        return False
 
     # Print configuration
     print(f"\nProcessing video: {video_path}")
@@ -1802,6 +1997,18 @@ def process_video_highlights(
         fallback_intervals: List[Tuple[float, float]] = []
         if not intervals:
             print("[info] No threshold-based highlights found. Selecting strongest motion windows for review.")
+            # Always-visible diagnostics for the "found nothing" case so a
+            # multi-hour run does not need repeating with --debug to see why.
+            LOGGER.info(
+                "detection diagnostics: speed_samples=%d (median=%.1f max=%.1f px/s), "
+                "audio_intervals=%d, sensitivity: speed=%.2f audio=%.2f",
+                len(speed),
+                float(np.median(speed)) if len(speed) else 0.0,
+                float(speed.max()) if len(speed) else 0.0,
+                len(audio_intervals),
+                speed_sensitivity,
+                audio_sensitivity,
+            )
             fallback_intervals = detect_review_candidate_intervals(
                 times,
                 speed,
@@ -1897,6 +2104,17 @@ def process_video_highlights(
         if trim_offset > 0:
             print(f"[info] Found {len(intervals)} highlights. Adjusting timestamps to original video (offset: +{format_time(trim_offset)})")
 
+        # Shared game-analysis payloads (original-video timebase), referenced
+        # by both the tracking manifest and analysis_game_states.json so the
+        # two files can never drift apart.
+        ball_track_stats = {
+            **{key: float(value) for key, value in ball_track.stats.items()},
+            "coverage_fraction": round(ball_coverage, 4),
+        }
+        original_goal_events = [
+            {**goal.to_dict(), "t": round(goal.t + trim_offset, 3)} for goal in goal_events
+        ]
+
         tracking_manifest = {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "source_video_path": original_video,
@@ -1934,23 +2152,13 @@ def process_video_highlights(
             },
             "game_analysis": {
                 "field_geometry": field_geometry.to_dict(),
-                "ball_track_stats": {
-                    **{key: float(value) for key, value in ball_track.stats.items()},
-                    "coverage_fraction": round(ball_coverage, 4),
-                },
+                "ball_track_stats": ball_track_stats,
                 "state_summary_s": state_summary,
-                "goal_events": [
-                    {**goal.to_dict(), "t": round(goal.t + trim_offset, 3)} for goal in goal_events
-                ],
+                "goal_events": original_goal_events,
             },
         }
         tracking_manifest_path = write_tracking_manifest(output_dir, tracking_manifest)
 
-        # Shift game analysis outputs into the original-video timebase for
-        # bookmarks and the standalone game-state manifest.
-        original_goal_events = [
-            {**goal.to_dict(), "t": round(goal.t + trim_offset, 3)} for goal in goal_events
-        ]
         original_game_states = [
             {
                 **seg.to_dict(),
@@ -1966,10 +2174,7 @@ def process_video_highlights(
                     "generated_at": datetime.now(timezone.utc).isoformat(),
                     "trim_offset_seconds": round(trim_offset, 3),
                     "field_geometry": field_geometry.to_dict(),
-                    "ball_track_stats": {
-                        **{key: float(value) for key, value in ball_track.stats.items()},
-                        "coverage_fraction": round(ball_coverage, 4),
-                    },
+                    "ball_track_stats": ball_track_stats,
                     "state_summary_s": state_summary,
                     "segments": original_game_states,
                     "goal_events": original_goal_events,
@@ -2091,13 +2296,12 @@ def process_video_highlights(
             )
             print(f"[camera] Plan summary: {camera_plan.summary()}")
 
-        if dump_training_data and camera_plan is not None:
+        if dump_training_data:
             decisions_path = os.path.join(output_dir, "camera_decisions.jsonl")
-            with open(decisions_path, "w", encoding="utf-8") as handle:
-                for decision in camera_plan.decisions:
-                    row = decision.to_dict()
-                    row["t_source"] = round(row["t"] + trim_offset, 3)
-                    handle.write(json.dumps(row) + "\n")
+            camera_plan.write_jsonl(
+                decisions_path,
+                transform=lambda row: {**row, "t_source": round(float(row["t"]) + trim_offset, 3)},
+            )
             ball_csv_path = os.path.join(output_dir, "ball_track.csv")
             with open(ball_csv_path, "w", newline="", encoding="utf-8") as handle:
                 writer = csv.DictWriter(handle, fieldnames=["t", "t_source", "x", "y"])
@@ -2114,7 +2318,7 @@ def process_video_highlights(
                 {"camera_decisions_path": decisions_path, "ball_track_csv_path": ball_csv_path},
             )
 
-        if debug_video and camera_plan is not None:
+        if debug_video:
             debug_path = os.path.join(output_dir, "debug_camera_wide.mp4")
             LOGGER.debug("Rendering annotated wide camera-decision video (center of the game + why)...")
             emit_progress(progress_callback, "debug_video", 0.95, "Rendering camera-decision debug video")
@@ -2140,7 +2344,7 @@ def process_video_highlights(
         if render_full_follow_cam:
             if camera_mode == "wide":
                 print("[warn] Full follow-cam movie requested, but camera mode is wide. Skipping full zoom export.")
-            elif camera_mode == "follow_ball" and camera_plan is not None:
+            elif camera_mode == "follow_ball":
                 emit_progress(
                     progress_callback,
                     "rendering_full_zoom",
@@ -2225,13 +2429,14 @@ def process_video_highlights(
         emit_progress(progress_callback, "rendering", 0.95, "Rendering highlight clips")
         if camera_mode == "wide":
             clip_paths = write_subclips(original_video, original_intervals, output_dir, max_workers=threads)
-        elif camera_mode == "follow_ball" and camera_plan is not None:
+        elif camera_mode == "follow_ball":
             clip_paths = write_follow_ball_subclips(
                 processing_video,
                 intervals,
                 output_dir,
                 camera_plan,
                 field_geometry,
+                max_workers=threads,
             )
         else:
             clip_paths = write_follow_cam_subclips(
@@ -2246,20 +2451,25 @@ def process_video_highlights(
                 track_time_offset_seconds=trim_offset,
             )
 
-        # Montage
+        # Montage (best-effort: clips are the deliverable, so a montage
+        # failure - e.g. moviepy missing on this host - must not fail a run
+        # whose clips all rendered successfully).
         if clip_paths:
-            VideoFileClip, concatenate_videoclips = _import_moviepy()
-            clips = []
             try:
-                clips = [VideoFileClip(p) for p in clip_paths]
-                montage = concatenate_videoclips(clips, method="compose")
-                montage_path = os.path.join(output_dir, "highlights_montage.mp4")
-                montage.write_videofile(montage_path, codec="libx264", audio_codec="aac")
-                montage.close()
-            finally:
-                for c in clips:
-                    c.close()
-            print(f"Wrote {len(clip_paths)} clips and a montage to: {output_dir}")
+                VideoFileClip, concatenate_videoclips = _import_moviepy()
+                clips = []
+                try:
+                    clips = [VideoFileClip(p) for p in clip_paths]
+                    montage = concatenate_videoclips(clips, method="compose")
+                    montage_path = os.path.join(output_dir, "highlights_montage.mp4")
+                    montage.write_videofile(montage_path, codec="libx264", audio_codec="aac")
+                    montage.close()
+                finally:
+                    for c in clips:
+                        c.close()
+                print(f"Wrote {len(clip_paths)} clips and a montage to: {output_dir}")
+            except Exception as montage_exc:
+                print(f"[warn] Montage skipped ({montage_exc}). {len(clip_paths)} clips are in: {output_dir}")
         emit_progress(progress_callback, "rendering", 0.98, "Clip rendering complete", {"clip_count": len(clip_paths)})
 
         # Optional overlay rendering
