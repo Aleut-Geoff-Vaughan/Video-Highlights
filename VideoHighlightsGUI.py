@@ -103,6 +103,8 @@ class VideoHighlightsGUI:
         self.no_audio = tk.BooleanVar(value=False)
         self.require_gpu = tk.BooleanVar(value=False)
         self.verbose = tk.BooleanVar(value=False)
+        self.debug_video = tk.BooleanVar(value=False)
+        self.dump_training_data = tk.BooleanVar(value=False)
         self.processing = False
 
         self.setup_ui()
@@ -242,12 +244,12 @@ class VideoHighlightsGUI:
         camera_mode_combo = ttk.Combobox(
             main_frame,
             textvariable=self.camera_mode,
-            values=("wide", "follow_action", "follow_player"),
+            values=("wide", "follow_action", "follow_player", "follow_ball"),
             state="readonly",
             width=18,
         )
         camera_mode_combo.grid(row=row, column=1, sticky=tk.W, pady=5)
-        ttk.Label(main_frame, text="(wide keeps full frame; follow modes crop to the tracked player)", foreground="gray").grid(row=row, column=2, sticky=tk.W, padx=(5, 0))
+        ttk.Label(main_frame, text="(wide=full frame; follow_player/action=tracked player; follow_ball=game camera)", foreground="gray").grid(row=row, column=2, sticky=tk.W, padx=(5, 0))
         row += 1
 
         ttk.Label(main_frame, text="Zoom factor:").grid(row=row, column=0, sticky=tk.W, pady=5)
@@ -283,6 +285,14 @@ class VideoHighlightsGUI:
 
         ttk.Checkbutton(main_frame, text="Verbose logging (show detailed progress)",
                        variable=self.verbose).grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=3)
+        row += 1
+
+        ttk.Checkbutton(main_frame, text="Render camera-decision debug video (center of the game + why)",
+                       variable=self.debug_video).grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=3)
+        row += 1
+
+        ttk.Checkbutton(main_frame, text="Dump training data (camera decisions + ball track)",
+                       variable=self.dump_training_data).grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=3)
         row += 1
 
         # Separator
@@ -445,7 +455,10 @@ class VideoHighlightsGUI:
             'threads': None,  # Auto-detect
             'require_gpu': self.require_gpu.get(),
             'speed_sensitivity': float(self.speed_sensitivity.get()),
-            'audio_sensitivity': float(self.audio_sensitivity.get())
+            'audio_sensitivity': float(self.audio_sensitivity.get()),
+            'debug': self.verbose.get(),
+            'debug_video': self.debug_video.get(),
+            'dump_training_data': self.dump_training_data.get()
         }
 
     def run_processing(self):

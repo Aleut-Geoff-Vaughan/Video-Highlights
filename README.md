@@ -68,7 +68,54 @@ Follow-cam clip export is available for player-centric runs:
 python VideoHighlights.py --video path/to/match.mp4 --out ./highlights_output --camera-mode follow_action --zoom-factor 1.6
 ```
 
-Use `--camera-mode wide` to preserve the original frame. `follow_player` keeps the selected or auto-selected player centered; `follow_action` blends the player track with nearby ball detections.
+Use `--camera-mode wide` to preserve the original frame. `follow_player` keeps the selected or auto-selected player centered; `follow_action` blends the player track with nearby ball detections; `follow_ball` is the game-centric camera that tracks the ball itself (see below).
+
+### Game Camera (`follow_ball`), Ball Tracking, and Goal Detection
+
+The `follow_ball` mode plans a virtual camera around "the center of the game":
+
+```bash
+python VideoHighlights.py --video match.mp4 --out ./out \
+  --camera-mode follow_ball --zoom-factor 1.8 --render-full-follow-cam \
+  --debug --log-file ./out/run_debug.log --debug-video --dump-training-data
+```
+
+What it does:
+
+1. **Ball tracking**: raw YOLO ball detections are filtered into a clean track
+   (teleporting outliers rejected, short gaps interpolated, re-acquisition
+   after long occlusions). Stats are logged and written to the manifests.
+2. **Field & goal geometry**: field bounds and both goal mouths are estimated
+   from the distribution of player positions across the match. Override with
+   `--goal-box-left x1,y1,x2,y2` / `--goal-box-right x1,y1,x2,y2`
+   (normalized 0-1 or pixel coordinates).
+3. **Game states**: the timeline is classified into `in_play`, `ball_lost`,
+   `restart_left/right` (goal kick / corner wait), `restart_touchline`
+   (throw-in wait), and `goal_left/right`. **During a restart wait the camera
+   locks onto the goal and does not leave** until the ball is confirmed back
+   in play.
+4. **Goal flagging**: three independent signals flag goals - the ball observed
+   inside a goal mouth (after entering from the field), the ball observed
+   crossing the goal line between the posts, and the ball vanishing while
+   heading into the goal mouth. Kickoff re-appearance at the center circle and
+   crowd-noise overlap raise confidence. Goals become `goal` bookmarks with a
+   guaranteed highlight clip.
+5. **Camera planning**: one decision per frame (center, zoom, focus, state,
+   confidence, and a human-readable *reason*). The camera leads the ball,
+   blends toward the nearby-player centroid, zooms out when the ball is lost,
+   and holds on goals/restarts.
+
+Debug & training outputs:
+
+1. `--debug` prints every diagnostic; `--log-file` captures a full timestamped
+   DEBUG log.
+2. `--debug-video` renders `debug_camera_wide.mp4`: the wide frame annotated
+   with the crop box, camera-center crosshair, ball + trail, field/goal boxes,
+   and a banner stating the game state and **why** the camera is where it is.
+3. `--dump-training-data` writes `camera_decisions.jsonl` (every per-frame
+   camera decision with reasons) and `ball_track.csv` for tuning/training.
+4. Every run writes `analysis_game_states.json` (state segments, goal events,
+   field geometry, ball-track stats).
 
 ### Run Processing Portal (Streamlit)
 

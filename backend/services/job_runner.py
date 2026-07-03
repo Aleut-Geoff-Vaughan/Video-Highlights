@@ -694,6 +694,12 @@ class JobRunner:
                 detection_conf=float(config.get("detection_conf", 0.18) or 0.18),
                 vid_stride=int(config.get("vid_stride", 1) or 1),
                 progress_callback=_record_engine_progress,
+                debug=bool(config.get("debug", False)),
+                log_file=str(Path(output_dir) / "pipeline_debug.log") if config.get("debug") else None,
+                debug_video=bool(config.get("debug_video", False)),
+                dump_training_data=bool(config.get("dump_training_data", False)),
+                goal_box_left=dict(config.get("goal_box_left") or {}) if isinstance(config.get("goal_box_left"), dict) else None,
+                goal_box_right=dict(config.get("goal_box_right") or {}) if isinstance(config.get("goal_box_right"), dict) else None,
             )
 
             artifacts = sorted(str(path.resolve()) for path in Path(output_dir).glob("*.mp4"))
