@@ -27,7 +27,8 @@ from ..schemas import (
 from ..serializers import event_to_read
 from ..services.audio_editor import render_audio_edit
 from ..services.event_clip_renderer import concat_clips_ffmpeg, render_clip_ffmpeg
-from ..services.follow_cam import render_follow_cam_clip
+from ..services.follow_cam import ball_weight_for_mode, render_follow_cam_clip
+from ..services.game_tracking import build_ball_track
 from ..services.storage import get_storage_backend
 from ..tenant import TenantContext, get_tenant_context
 from ..utils import decode_cursor, encode_cursor, ensure_dir, generate_id, utcnow
@@ -173,13 +174,38 @@ def _resolve_follow_cam_profile(event: Event) -> Tuple[str, float, List[Tuple[fl
     ball_track = _manifest_track_to_samples(tracking.get("ball_track"))
     if mode == "follow_ball":
         # Ball-centric clips lean on the ball track; the player track is the
-        # fallback for frames where the ball was not detected.
+        # fallback for frames where the ball was not detected. The manifest
+        # stores RAW detections, so clean them the same way the pipeline does
+        # (outlier rejection) before letting them steer the camera.
+        ball_track = _cleaned_ball_samples(ball_track, manifest)
         if not ball_track and not player_track:
             return "wide", zoom_factor, [], []
         return mode, max(1.0, zoom_factor), player_track, ball_track
     if not player_track:
         return "wide", zoom_factor, [], []
     return mode, max(1.0, zoom_factor), player_track, ball_track
+
+
+def _cleaned_ball_samples(
+    raw_samples: List[Tuple[float, float, float]],
+    manifest: Dict[str, object],
+) -> List[Tuple[float, float, float]]:
+    if not raw_samples:
+        return []
+    video = manifest.get("video", {}) if isinstance(manifest.get("video", {}), dict) else {}
+    try:
+        frame_w = int(video.get("frame_width") or 1920)
+        frame_h = int(video.get("frame_height") or 1080)
+    except Exception:
+        frame_w, frame_h = 1920, 1080
+    try:
+        track = build_ball_track(raw_samples, (frame_w, frame_h))
+    except Exception:
+        return raw_samples
+    return [
+        (float(t), float(x), float(y))
+        for t, x, y in zip(track.times, track.xs, track.ys)
+    ]
 
 
 def _render_window_clip(
@@ -194,8 +220,7 @@ def _render_window_clip(
 ) -> Tuple[str, float]:
     camera_mode, zoom_factor, player_track, ball_track = _resolve_follow_cam_profile(event)
     if camera_mode != "wide" and (player_track or ball_track):
-        ball_weights = {"follow_action": 0.35, "follow_ball": 1.0}
-        ball_weight = ball_weights.get(camera_mode, 0.0)
+        ball_weight = ball_weight_for_mode(camera_mode)
         render_follow_cam_clip(
             video_path=source_video,
             output_path=output_path,

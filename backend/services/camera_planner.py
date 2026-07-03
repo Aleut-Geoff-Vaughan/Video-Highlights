@@ -25,8 +25,8 @@ from __future__ import annotations
 import json
 import logging
 import math
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Tuple
+from dataclasses import dataclass, field, replace
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -68,6 +68,10 @@ class CameraPlannerConfig:
     restart_zoom_cap: float = 1.35
     goal_zoom_scale: float = 1.0
     min_zoom: float = 1.05
+    # Fast-ball zoom-out: at fast_ball_speed_frame_widths_per_s the zoom
+    # widens by fast_ball_zoom_out_frac of the base zoom (linear below that).
+    fast_ball_speed_frame_widths_per_s: float = 1.2
+    fast_ball_zoom_out_frac: float = 0.25
     # Aim slightly infield from the goal center during restarts so the crop
     # shows both the goal and the approach play.
     goal_infield_offset_frac: float = 0.05
@@ -75,9 +79,13 @@ class CameraPlannerConfig:
     player_bin_s: float = 0.5
 
 
-@dataclass
+@dataclass(slots=True)
 class CameraDecision:
-    """One per output frame: where the camera points and why."""
+    """One per output frame: where the camera points and why.
+
+    slots=True matters here: an hour of 60fps video produces ~216k of these,
+    and slotted instances roughly halve the per-decision memory.
+    """
 
     index: int
     t: float
@@ -124,16 +132,20 @@ class CameraPlan:
     def __len__(self) -> int:
         return len(self.decisions)
 
-    def centers(self) -> List[Tuple[float, float]]:
-        return [(d.center_x, d.center_y) for d in self.decisions]
-
-    def zooms(self) -> List[float]:
-        return [d.zoom for d in self.decisions]
-
-    def write_jsonl(self, path: str) -> str:
+    def write_jsonl(
+        self,
+        path: str,
+        transform: Optional[Callable[[Dict[str, object]], Dict[str, object]]] = None,
+    ) -> str:
+        """Write one JSON object per decision; ``transform`` can enrich rows
+        (e.g. adding source-video timestamps) so there is exactly one
+        serialization of the training-data format."""
         with open(path, "w", encoding="utf-8") as handle:
             for decision in self.decisions:
-                handle.write(json.dumps(decision.to_dict()) + "\n")
+                row = decision.to_dict()
+                if transform is not None:
+                    row = transform(row)
+                handle.write(json.dumps(row) + "\n")
         return path
 
     def summary(self) -> Dict[str, object]:
@@ -168,8 +180,7 @@ def slice_plan(plan: CameraPlan, start_seconds: float, end_seconds: float) -> Ca
         base_zoom=plan.base_zoom,
     )
     for new_index, decision in enumerate(plan.decisions[first:last]):
-        copied = CameraDecision(**{**decision.__dict__, "index": new_index})
-        sliced.decisions.append(copied)
+        sliced.decisions.append(replace(decision, index=new_index))
     return sliced
 
 
@@ -342,8 +353,10 @@ def plan_camera(
                 reason += " (interpolated across a short detection gap)"
             # Fast ball -> slightly wider shot so the play stays in frame.
             speed = math.hypot(vx, vy)
-            speed_frac = min(1.0, speed / (1.2 * frame_w))
-            target_zoom = max(cfg.min_zoom, base_zoom * (1.0 - 0.25 * speed_frac))
+            speed_frac = min(1.0, speed / (cfg.fast_ball_speed_frame_widths_per_s * frame_w))
+            target_zoom = max(
+                cfg.min_zoom, base_zoom * (1.0 - cfg.fast_ball_zoom_out_frac * speed_frac)
+            )
         else:
             # Ball not visible: hold briefly, then follow the player cluster.
             recently_seen = (

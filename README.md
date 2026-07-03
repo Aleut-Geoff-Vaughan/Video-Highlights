@@ -400,6 +400,34 @@ Use `GET /v1/matches/{match_id}/assets/{asset_id}/download-url` to resolve local
 python VideoHighlightsGUI.py
 ```
 
+## Docker Hub Publishing (Automated)
+
+Every push to `main` builds the image and publishes it to Docker Hub via
+`.github/workflows/docker-publish.yml` (default image:
+`geoffvaughan/video-highlights`, tags `latest` + `sha-<commit>`; git tags
+like `v1.2.3` publish version tags too).
+
+One-time setup in the GitHub repo (Settings > Secrets and variables > Actions):
+
+1. Secret `DOCKERHUB_USERNAME`: your Docker Hub username.
+2. Secret `DOCKERHUB_TOKEN`: a Docker Hub personal access token (Read/Write).
+3. Optional variable `DOCKERHUB_IMAGE`: override the image name.
+
+Manual publish from any machine:
+
+```bash
+docker login -u <username>
+docker build -t <username>/video-highlights:latest .
+docker push <username>/video-highlights:latest
+```
+
+Run the published image without cloning the repo:
+
+```bash
+docker pull geoffvaughan/video-highlights:latest
+docker run --rm -p 8000:8000 geoffvaughan/video-highlights:latest
+```
+
 ## Docker and GPU Notes
 
 Containerized GPU execution supports local PC hosts, NVIDIA-capable edge systems, and cloud GPU nodes when configured correctly.
