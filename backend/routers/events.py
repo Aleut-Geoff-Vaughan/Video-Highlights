@@ -161,7 +161,7 @@ def _resolve_follow_cam_profile(event: Event) -> Tuple[str, float, List[Tuple[fl
     tracking = manifest.get("tracking", {}) if isinstance(manifest.get("tracking", {}), dict) else {}
 
     mode = str(source.get("camera_mode") or camera.get("mode") or "wide").strip().lower()
-    if mode not in {"follow_action", "follow_player"}:
+    if mode not in {"follow_action", "follow_player", "follow_ball"}:
         return "wide", 1.0, [], []
 
     try:
@@ -170,9 +170,15 @@ def _resolve_follow_cam_profile(event: Event) -> Tuple[str, float, List[Tuple[fl
         zoom_factor = 1.6
 
     player_track = _manifest_track_to_samples(tracking.get("target_track"))
+    ball_track = _manifest_track_to_samples(tracking.get("ball_track"))
+    if mode == "follow_ball":
+        # Ball-centric clips lean on the ball track; the player track is the
+        # fallback for frames where the ball was not detected.
+        if not ball_track and not player_track:
+            return "wide", zoom_factor, [], []
+        return mode, max(1.0, zoom_factor), player_track, ball_track
     if not player_track:
         return "wide", zoom_factor, [], []
-    ball_track = _manifest_track_to_samples(tracking.get("ball_track"))
     return mode, max(1.0, zoom_factor), player_track, ball_track
 
 
@@ -187,8 +193,9 @@ def _render_window_clip(
     prefer_gpu: bool,
 ) -> Tuple[str, float]:
     camera_mode, zoom_factor, player_track, ball_track = _resolve_follow_cam_profile(event)
-    if camera_mode != "wide" and player_track:
-        ball_weight = 0.35 if camera_mode == "follow_action" else 0.0
+    if camera_mode != "wide" and (player_track or ball_track):
+        ball_weights = {"follow_action": 0.35, "follow_ball": 1.0}
+        ball_weight = ball_weights.get(camera_mode, 0.0)
         render_follow_cam_clip(
             video_path=source_video,
             output_path=output_path,

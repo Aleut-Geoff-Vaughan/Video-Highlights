@@ -1,4 +1,10 @@
 # Lightweight dependency set for backend/API tests and CI.
+# numpy/opencv/tqdm are required because backend services (follow_cam,
+# game_tracking, camera_planner, camera_render) and the VideoHighlights
+# pipeline module import them at module level.
+numpy>=1.19.0
+opencv-python-headless>=4.5.0
+tqdm>=4.60.0
 fastapi>=0.111.0
 uvicorn[standard]>=0.30.0
 sqlmodel>=0.0.22

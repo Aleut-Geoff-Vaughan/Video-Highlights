@@ -52,6 +52,8 @@ import math
 import argparse
 import csv
 import json
+import logging
+import subprocess
 import time
 from datetime import datetime, timezone
 from dataclasses import dataclass
@@ -69,23 +71,85 @@ from backend.services.player_focus import (
     resolve_player_roi_box,
     stitch_target_track,
 )
+from backend.services.game_tracking import (
+    BallTrack,
+    FieldGeometry,
+    GameStateSegment,
+    GoalEvent,
+    analyze_game_states,
+    build_ball_track,
+    detect_goal_events,
+    estimate_field_geometry,
+    state_at,
+    summarize_states,
+)
+from backend.services.camera_planner import CameraPlan, plan_camera, slice_plan
+from backend.services.camera_render import render_camera_plan_video
 
-# YOLOv8 API
-from ultralytics import YOLO
+LOGGER = logging.getLogger("videohighlights")
 
-# Audio & video IO
-import librosa
-try:
-    from moviepy.editor import VideoFileClip, concatenate_videoclips
-except ImportError:
+
+def setup_logging(debug: bool = False, log_file: Optional[str] = None) -> None:
+    """Configure pipeline logging.
+
+    ``debug=True`` prints every [debug]-level diagnostic to the console.
+    ``log_file`` additionally captures the full DEBUG stream (with
+    timestamps) regardless of the console level - useful for reviewing a run
+    and for building training datasets.
+    """
+    root = logging.getLogger("videohighlights")
+    root.setLevel(logging.DEBUG)
+    # Reset handlers so repeated runs (GUI / API worker) don't duplicate output.
+    for handler in list(root.handlers):
+        root.removeHandler(handler)
+
+    console = logging.StreamHandler(sys.stdout)
+    console.setLevel(logging.DEBUG if debug else logging.INFO)
+    console.setFormatter(logging.Formatter("[%(levelname).1s] %(message)s"))
+    root.addHandler(console)
+
+    if log_file:
+        log_dir = os.path.dirname(os.path.abspath(log_file))
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        file_handler = logging.FileHandler(log_file, mode="w", encoding="utf-8")
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+        )
+        root.addHandler(file_handler)
+    root.propagate = False
+
+
+# --- Optional heavy dependencies (loaded lazily so this module can be
+# imported by the API/tests without ultralytics/librosa/moviepy installed) ---
+
+
+def _import_yolo():
     try:
-        # moviepy 2.x has different import structure
-        from moviepy.video.io.VideoFileClip import VideoFileClip
-        from moviepy.video.compositing.CompositeVideoClip import concatenate_videoclips
-    except ImportError as e:
-        print(f"Error: Could not import moviepy. Please install it with: pip install moviepy")
-        print(f"Details: {e}")
-        sys.exit(1)
+        from ultralytics import YOLO  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError(
+            "ultralytics is required for tracking. Install with: pip install ultralytics"
+        ) from exc
+    return YOLO
+
+
+def _import_moviepy():
+    try:
+        from moviepy.editor import VideoFileClip, concatenate_videoclips  # type: ignore
+    except ImportError:
+        try:
+            # moviepy 2.x has a different import structure
+            from moviepy.video.io.VideoFileClip import VideoFileClip  # type: ignore
+            from moviepy.video.compositing.CompositeVideoClip import (  # type: ignore
+                concatenate_videoclips,
+            )
+        except ImportError as exc:
+            raise RuntimeError(
+                "moviepy is required for clip export. Install with: pip install moviepy"
+            ) from exc
+    return VideoFileClip, concatenate_videoclips
 
 
 @dataclass
@@ -95,7 +159,7 @@ class TrackPoint:
     bbox: Optional[Tuple[float, float, float, float]] = None
 
 
-FOLLOW_CAM_MODES = {"wide", "follow_player", "follow_action"}
+FOLLOW_CAM_MODES = {"wide", "follow_player", "follow_action", "follow_ball"}
 ProgressCallback = Callable[[str, float, str, Optional[Dict[str, object]]], None]
 
 
@@ -195,7 +259,31 @@ def create_trimmed_video(video_path: str, out_dir: str, start_time: Optional[flo
     ensure_dir(out_dir)
     trimmed_path = os.path.join(out_dir, "trimmed_working_video.mp4")
 
+    # Fast path: ffmpeg re-encode (input seeking + veryfast preset) is
+    # dramatically faster than the moviepy fallback on long recordings while
+    # staying frame-accurate.
     try:
+        from backend.services.ffmpeg_tools import ffmpeg_available, ffmpeg_exe
+
+        if ffmpeg_available():
+            cmd = [
+                ffmpeg_exe(), "-y", "-hide_banner", "-loglevel", "error",
+                "-ss", f"{start_time:.3f}", "-to", f"{end_time:.3f}",
+                "-i", video_path,
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                "-c:a", "aac", "-movflags", "+faststart",
+                trimmed_path,
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if result.returncode == 0 and os.path.exists(trimmed_path) and os.path.getsize(trimmed_path) > 0:
+                print(f"[trim] Trimmed video saved to: {trimmed_path} (ffmpeg)")
+                return trimmed_path, start_time
+            LOGGER.warning("ffmpeg trim failed (%s); falling back to moviepy", result.stderr.strip()[:300])
+    except Exception as exc:
+        LOGGER.warning("ffmpeg trim unavailable (%s); falling back to moviepy", exc)
+
+    try:
+        VideoFileClip, _ = _import_moviepy()
         with VideoFileClip(video_path) as clip:
             # Try both subclip and subclipped (different moviepy versions)
             try:
@@ -301,9 +389,33 @@ def build_analysis_bookmarks(
     requested_targets: List[str],
     live_manifest_path: Optional[str] = None,
     live_manifest_context: Optional[Dict[str, object]] = None,
+    goal_events: Optional[List[Dict[str, object]]] = None,
+    game_states: Optional[List[Dict[str, object]]] = None,
 ) -> List[Dict[str, object]]:
+    """Build the bookmark table for a run.
+
+    ``goal_events`` (dicts with ``t``/``side``/``confidence``/``reason`` in the
+    same timebase as ``original_intervals``) upgrade any overlapping interval
+    to a confirmed ``goal`` bookmark. ``game_states`` (dicts with
+    ``start_s``/``end_s``/``state``) tag each bookmark with the game state at
+    its center so tags explain what the game was doing.
+    """
     bookmarks: List[Dict[str, object]] = []
     context = dict(live_manifest_context or {})
+    goal_rows = list(goal_events or [])
+    state_rows = list(game_states or [])
+
+    def _state_label_at(t: float) -> Optional[str]:
+        for row in state_rows:
+            if float(row.get("start_s", 0.0)) <= t < float(row.get("end_s", 0.0)):
+                return str(row.get("state"))
+        return None
+
+    def _goal_within(start_s: float, end_s: float) -> Optional[Dict[str, object]]:
+        for row in goal_rows:
+            if start_s <= float(row.get("t", -1.0)) <= end_s:
+                return row
+        return None
 
     def _write_live_manifest() -> None:
         if not live_manifest_path:
@@ -345,22 +457,45 @@ def build_analysis_bookmarks(
 
         occurred_at_s = (start_s + end_s) / 2.0
         duration_s = max(0.0, end_s - start_s)
+
+        label = f"{event_type}_candidate"
+        signals: Dict[str, object] = {
+            "speed_overlap_s": round(speed_overlap, 3),
+            "audio_overlap_s": round(audio_overlap, 3),
+        }
+
+        # Ball-tracking goal detection overrides the heuristic event type:
+        # a flagged goal inside this interval makes it a goal bookmark.
+        goal_row = _goal_within(start_s, end_s)
+        if goal_row is not None:
+            event_type = "goal"
+            label = "goal_detected"
+            occurred_at_s = float(goal_row.get("t", occurred_at_s))
+            confidence = float(min(0.99, max(confidence, float(goal_row.get("confidence", 0.0)))))
+            if "ball_tracking" not in sources:
+                sources.append("ball_tracking")
+            signals["goal_side"] = goal_row.get("side")
+            signals["goal_reason"] = goal_row.get("reason")
+            if has_audio_signal:
+                # Crowd noise corroborating a detected goal.
+                confidence = float(min(0.99, confidence + 0.05))
+
+        game_state = _state_label_at(occurred_at_s)
+
         bookmarks.append(
             {
                 "bookmark_id": f"bm_{idx:04d}",
                 "index": idx,
                 "event_type": event_type,
-                "label": f"{event_type}_candidate",
+                "label": label,
                 "confidence": confidence,
                 "start_s": round(start_s, 3),
                 "occurred_at_s": round(occurred_at_s, 3),
                 "end_s": round(end_s, 3),
                 "duration_s": round(duration_s, 3),
                 "sources": sources,
-                "signals": {
-                    "speed_overlap_s": round(speed_overlap, 3),
-                    "audio_overlap_s": round(audio_overlap, 3),
-                },
+                "game_state": game_state,
+                "signals": signals,
             }
         )
         _write_live_manifest()
@@ -389,6 +524,7 @@ def write_analysis_bookmark_files(
         "end_s",
         "duration_s",
         "sources",
+        "game_state",
     ]
     with open(csv_path, "w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=field_names)
@@ -469,6 +605,7 @@ def track_video(
     imgsz = max(320, min(1920, int(inference_imgsz or 960)))
     conf = min(0.9, max(0.01, float(detection_conf or 0.18)))
     stride = max(1, int(vid_stride or 1))
+    YOLO = _import_yolo()
     model = YOLO(model_name)
 
     # Enable GPU if available and use half precision for faster inference
@@ -512,6 +649,7 @@ def track_video(
     # The stream=True iterator yields per-frame results with .boxes and .boxes.id
     tracks: Dict[int, List[TrackPoint]] = {}
     ball_trajectory: List[TrackPoint] = []
+    all_player_positions: List[Tuple[float, float, float]] = []  # (t, x, y) for every person box
     last_progress_emit = 0.0
 
     for frame_idx, result in enumerate(
@@ -563,6 +701,7 @@ def track_video(
             cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
 
             if c == 0:  # person
+                all_player_positions.append((t, float(cx), float(cy)))
                 tracks.setdefault(track_id, []).append(
                     TrackPoint(
                         t=t,
@@ -631,6 +770,11 @@ def track_video(
             "target_track_id": int(target_id),
             "stitched_track_ids": stitched_track_ids,
             "stitched_track_count": len(stitched_track_ids),
+            "player_positions": (
+                np.asarray(all_player_positions, dtype=np.float64)
+                if all_player_positions
+                else np.empty((0, 3), dtype=np.float64)
+            ),
         },
     )
 
@@ -696,7 +840,7 @@ def compute_direction_changes(traj: List[TrackPoint], fps: float) -> Tuple[np.nd
     # Align with times (skip first two timestamps due to diff operations)
     aligned_times = times[2:]
 
-    print(f"[debug] Direction changes: {len(direction_changes)} values, max={np.rad2deg(direction_changes.max()):.1f}°, mean={np.rad2deg(direction_changes.mean()):.1f}°")
+    LOGGER.debug(f"Direction changes: {len(direction_changes)} values, max={np.rad2deg(direction_changes.max()):.1f}°, mean={np.rad2deg(direction_changes.mean()):.1f}°")
 
     return aligned_times, direction_changes
 
@@ -715,7 +859,7 @@ def compute_ball_proximity_score(player_traj: List[TrackPoint], ball_traj: List[
         proximity_scores: Array of proximity scores (higher = player closer to ball)
     """
     if len(player_traj) == 0 or len(ball_traj) == 0:
-        print("[debug] No ball or player trajectory for proximity scoring")
+        LOGGER.debug("No ball or player trajectory for proximity scoring")
         return np.array([]), np.array([])
 
     player_times = np.array([p.t for p in player_traj])
@@ -753,7 +897,7 @@ def compute_ball_proximity_score(player_traj: List[TrackPoint], ball_traj: List[
         proximity_scores.append(score)
 
     proximity_scores = np.array(proximity_scores)
-    print(f"[debug] Ball proximity: {len(proximity_scores)} scores, max={proximity_scores.max():.3f}, mean={proximity_scores.mean():.3f}")
+    LOGGER.debug(f"Ball proximity: {len(proximity_scores)} scores, max={proximity_scores.max():.3f}, mean={proximity_scores.mean():.3f}")
 
     return player_times, proximity_scores
 
@@ -763,20 +907,22 @@ def detect_highlights_from_speed(times: np.ndarray, speed: np.ndarray, pre: floa
         return []
     thr = robust_threshold(speed, k=k)
     candidates = np.where(speed >= thr)[0]
-    print(f"[debug] Speed threshold: {thr:.2f} (k={k}), found {len(candidates)} speed peaks")
+    LOGGER.debug(f"Speed threshold: {thr:.2f} (k={k}), found {len(candidates)} speed peaks")
     if len(candidates) > 0:
-        print(f"[debug] Speed range: min={speed.min():.2f}, max={speed.max():.2f}, median={np.median(speed):.2f}")
+        LOGGER.debug(f"Speed range: min={speed.min():.2f}, max={speed.max():.2f}, median={np.median(speed):.2f}")
     intervals = []
     for idx in candidates:
         t = float(times[idx])
         intervals.append((max(0.0, t - pre), t + post))
     merged = merge_intervals(intervals)
-    print(f"[debug] Speed intervals before merge: {len(intervals)}, after merge: {len(merged)}")
+    LOGGER.debug(f"Speed intervals before merge: {len(intervals)}, after merge: {len(merged)}")
     return merged
 
 
 def detect_audio_peaks(video_path: str, pre: float, post: float, k: float = 2.0) -> List[Tuple[float, float]]:
     try:
+        import librosa  # Lazy: audio analysis is optional at runtime
+
         # Load audio at native sampling rate
         y, sr = librosa.load(video_path, sr=None, mono=True)
         # Frame over ~100 ms windows
@@ -787,12 +933,12 @@ def detect_audio_peaks(video_path: str, pre: float, post: float, k: float = 2.0)
         times = librosa.frames_to_time(np.arange(len(rms)), sr=sr, hop_length=hop, n_fft=win)
         thr = robust_threshold(rms, k=k)
         peaks = np.where(rms >= thr)[0]
-        print(f"[debug] Audio threshold: {thr:.4f} (k={k}), found {len(peaks)} audio peaks")
+        LOGGER.debug(f"Audio threshold: {thr:.4f} (k={k}), found {len(peaks)} audio peaks")
         if len(peaks) > 0:
-            print(f"[debug] Audio RMS range: min={rms.min():.4f}, max={rms.max():.4f}, median={np.median(rms):.4f}")
+            LOGGER.debug(f"Audio RMS range: min={rms.min():.4f}, max={rms.max():.4f}, median={np.median(rms):.4f}")
         intervals = [(max(0.0, float(times[i]) - pre), float(times[i]) + post) for i in peaks]
         merged = merge_intervals(intervals)
-        print(f"[debug] Audio intervals before merge: {len(intervals)}, after merge: {len(merged)}")
+        LOGGER.debug(f"Audio intervals before merge: {len(intervals)}, after merge: {len(merged)}")
         return merged
     except Exception as e:
         print(f"[warn] audio peak detection failed: {e}")
@@ -829,7 +975,7 @@ def detect_highlights_multi_factor(
         List of (start, end) intervals
     """
     if len(speed) == 0:
-        print("[debug] No speed data for multi-factor detection")
+        LOGGER.debug("No speed data for multi-factor detection")
         return []
 
     # Normalize speed to 0-1 range
@@ -837,14 +983,14 @@ def detect_highlights_multi_factor(
 
     # Ensure ball_proximity aligns with speed times
     if len(ball_proximity) == 0:
-        print("[debug] No ball proximity data, using zero weight")
+        LOGGER.debug("No ball proximity data, using zero weight")
         proximity_norm = np.zeros_like(speed_norm)
     else:
         # ball_proximity should already be 0-1 range
         proximity_norm = ball_proximity
         # If lengths don't match, interpolate or pad
         if len(proximity_norm) != len(speed_norm):
-            print(f"[debug] Length mismatch: speed={len(speed_norm)}, proximity={len(proximity_norm)}")
+            LOGGER.debug(f"Length mismatch: speed={len(speed_norm)}, proximity={len(proximity_norm)}")
             # Truncate or pad to match
             if len(proximity_norm) > len(speed_norm):
                 proximity_norm = proximity_norm[:len(speed_norm)]
@@ -853,14 +999,14 @@ def detect_highlights_multi_factor(
 
     # Ensure direction_changes aligns with speed times
     if len(direction_changes) == 0:
-        print("[debug] No direction change data, using zero weight")
+        LOGGER.debug("No direction change data, using zero weight")
         direction_norm = np.zeros_like(speed_norm)
     else:
         # Normalize direction changes (0 = no change, pi = complete reversal)
         direction_norm = direction_changes / (np.pi + 1e-9)  # Normalize to 0-1
         # If lengths don't match, pad or truncate
         if len(direction_norm) != len(speed_norm):
-            print(f"[debug] Length mismatch: speed={len(speed_norm)}, direction={len(direction_norm)}")
+            LOGGER.debug(f"Length mismatch: speed={len(speed_norm)}, direction={len(direction_norm)}")
             if len(direction_norm) > len(speed_norm):
                 direction_norm = direction_norm[:len(speed_norm)]
             else:
@@ -869,14 +1015,14 @@ def detect_highlights_multi_factor(
     # Compute combined score
     combined_score = (speed_weight * speed_norm) + (proximity_weight * proximity_norm) + (direction_weight * direction_norm)
 
-    print(f"[debug] Multi-factor score: min={combined_score.min():.3f}, max={combined_score.max():.3f}, mean={combined_score.mean():.3f}")
-    print(f"[debug] Weights: speed={speed_weight}, proximity={proximity_weight}, direction={direction_weight}")
+    LOGGER.debug(f"Multi-factor score: min={combined_score.min():.3f}, max={combined_score.max():.3f}, mean={combined_score.mean():.3f}")
+    LOGGER.debug(f"Weights: speed={speed_weight}, proximity={proximity_weight}, direction={direction_weight}")
 
     # Apply robust threshold to combined score
     thr = robust_threshold(combined_score, k=k)
     candidates = np.where(combined_score >= thr)[0]
 
-    print(f"[debug] Multi-factor threshold: {thr:.3f} (k={k}), found {len(candidates)} highlights")
+    LOGGER.debug(f"Multi-factor threshold: {thr:.3f} (k={k}), found {len(candidates)} highlights")
 
     intervals = []
     for idx in candidates:
@@ -884,7 +1030,7 @@ def detect_highlights_multi_factor(
         intervals.append((max(0.0, t - pre), t + post))
 
     merged = merge_intervals(intervals)
-    print(f"[debug] Multi-factor intervals before merge: {len(intervals)}, after merge: {len(merged)}")
+    LOGGER.debug(f"Multi-factor intervals before merge: {len(intervals)}, after merge: {len(merged)}")
 
     return merged
 
@@ -927,7 +1073,7 @@ def detect_review_candidate_intervals(
 
     intervals = [(max(0.0, t - pre), t + post) for t in sorted(selected_times)]
     merged = merge_intervals(intervals, min_gap=1.0)
-    print(f"[debug] Review candidate fallback intervals: {len(merged)}")
+    LOGGER.debug(f"Review candidate fallback intervals: {len(merged)}")
     return merged
 
 
@@ -966,6 +1112,7 @@ def write_single_subclip(video_path: str, interval: Tuple[float, float], clip_nu
     clip = None
     sub = None
     try:
+        VideoFileClip, _ = _import_moviepy()
         clip = VideoFileClip(video_path)
         s = max(0.0, s)
         e = min(clip.duration, e)
@@ -1193,6 +1340,45 @@ def write_follow_cam_subclips(
     return paths
 
 
+def write_follow_ball_subclips(
+    processing_video: str,
+    intervals: List[Tuple[float, float]],
+    out_dir: str,
+    camera_plan: CameraPlan,
+    field_geometry: FieldGeometry,
+    overlay_banner: bool = False,
+) -> List[str]:
+    """Render highlight clips from the game-centric camera plan.
+
+    Intervals are in the processing-video timebase (matching the plan).
+    Rendering is sequential: each clip decodes from the same source and the
+    ffmpeg pipe already saturates I/O, so parallelism buys nothing here.
+    """
+    print(f"[follow-ball] Writing {len(intervals)} clips from the game camera plan")
+    paths: List[str] = []
+    for clip_num, (s, e) in enumerate(tqdm(intervals, desc="Writing follow-ball clips", unit="clip"), start=1):
+        out_path = os.path.join(out_dir, f"highlight_{clip_num:02d}.mp4")
+        try:
+            sub_plan = slice_plan(camera_plan, s, e)
+            if len(sub_plan) == 0:
+                print(f"[warn] Follow-ball clip {clip_num} has no planned frames ({s:.1f}s - {e:.1f}s)")
+                continue
+            paths.append(
+                render_camera_plan_video(
+                    video_path=processing_video,
+                    output_path=out_path,
+                    plan=sub_plan,
+                    include_audio=True,
+                    overlay_banner=overlay_banner,
+                    geometry=field_geometry,
+                )
+            )
+        except Exception as ex:
+            print(f"[warn] Failed to write follow-ball clip {clip_num} ({s:.1f}s - {e:.1f}s): {ex}")
+    paths.sort()
+    return paths
+
+
 def write_full_follow_cam_video(
     video_path: str,
     interval: Tuple[float, float],
@@ -1309,6 +1495,7 @@ def draw_single_spotlight_overlay(video_path: str, traj: List[TrackPoint], inter
 
         # Add audio using moviepy
         try:
+            VideoFileClip, _ = _import_moviepy()
             with VideoFileClip(video_path) as source_clip:
                 with VideoFileClip(temp_path) as video_only:
                     # Extract audio from the same time interval
@@ -1397,6 +1584,12 @@ def process_video_highlights(
     detection_conf: float = 0.18,
     vid_stride: int = 1,
     progress_callback: Optional[ProgressCallback] = None,
+    debug: bool = False,
+    log_file: Optional[str] = None,
+    debug_video: bool = False,
+    dump_training_data: bool = False,
+    goal_box_left: Optional[Dict[str, float]] = None,
+    goal_box_right: Optional[Dict[str, float]] = None,
 ) -> bool:
     """
     Core video highlights processing function.
@@ -1428,10 +1621,20 @@ def process_video_highlights(
         detection_conf: Detection confidence threshold
         vid_stride: Analyze every Nth video frame
         progress_callback: Optional callback for realtime stage/progress telemetry
+        debug: Print full debug diagnostics to the console
+        log_file: Also write a full DEBUG log (with timestamps) to this path
+        debug_video: Render an annotated wide "camera decisions" review video
+            showing the center of the game, the crop box, the ball, and why
+        dump_training_data: Write camera_decisions.jsonl and ball_track.csv for
+            model tuning/training
+        goal_box_left: Optional manual left goal box {x1,y1,x2,y2} (pixels or normalized)
+        goal_box_right: Optional manual right goal box {x1,y1,x2,y2} (pixels or normalized)
 
     Returns:
         True if processing succeeded, False otherwise
     """
+    setup_logging(debug=debug, log_file=log_file)
+
     # Check GPU requirement
     emit_progress(progress_callback, "initializing", 0.02, "Validating runtime and GPU requirements")
     if require_gpu:
@@ -1501,6 +1704,11 @@ def process_video_highlights(
     print(f"Detector: {yolo_model} | Tracker: {tracker_config} | imgsz={int(inference_imgsz)} | conf={float(detection_conf):.2f} | stride={int(vid_stride)}")
     print(f"Spotlight overlay: {'Yes' if overlay else 'No'}")
     print(f"Analysis-only mode: {'Yes' if analysis_only else 'No'}")
+    print(f"Debug logging: {'Yes' if debug else 'No'}{f' (log file: {log_file})' if log_file else ''}")
+    print(f"Camera-decision debug video: {'Yes' if debug_video else 'No'}")
+    print(f"Training data dump: {'Yes' if dump_training_data else 'No'}")
+    if goal_box_left or goal_box_right:
+        print(f"Manual goal boxes: left={goal_box_left or 'auto'} right={goal_box_right or 'auto'}")
     print()
 
     ensure_dir(output_dir)
@@ -1589,7 +1797,7 @@ def process_video_highlights(
 
         print("[4/5] Merging and pruning intervals...")
         emit_progress(progress_callback, "bookmarks", 0.82, "Merging detection intervals into review candidates")
-        print(f"[debug] Total intervals before merge: multi-factor={len(speed_intervals)}, audio={len(audio_intervals)}")
+        LOGGER.debug(f"Total intervals before merge: multi-factor={len(speed_intervals)}, audio={len(audio_intervals)}")
         intervals = merge_intervals(speed_intervals + audio_intervals)
         fallback_intervals: List[Tuple[float, float]] = []
         if not intervals:
@@ -1603,12 +1811,66 @@ def process_video_highlights(
                 max_candidates=3,
             )
             intervals = merge_intervals(fallback_intervals)
-        print(f"[debug] Total intervals after final merge: {len(intervals)}")
+        LOGGER.debug(f"Total intervals after final merge: {len(intervals)}")
 
         # Get video duration to clamp intervals
         cap_check = cv2.VideoCapture(processing_video)
         video_duration = cap_check.get(cv2.CAP_PROP_FRAME_COUNT) / cap_check.get(cv2.CAP_PROP_FPS) if cap_check.isOpened() else float('inf')
         cap_check.release()
+
+        analysis_end_s = video_duration
+        if not math.isfinite(analysis_end_s) or analysis_end_s <= 0:
+            analysis_end_s = max(
+                traj[-1].t if traj else 0.0,
+                ball_traj[-1].t if ball_traj else 0.0,
+                1.0,
+            )
+
+        print("[4b] Analyzing ball track, field geometry, and game states...")
+        emit_progress(progress_callback, "game_analysis", 0.83, "Building ball track and game-state timeline")
+        player_positions = selection_metadata.get("player_positions")
+        ball_track = build_ball_track(ball_traj, (W, H))
+        field_geometry = estimate_field_geometry(
+            player_positions, (W, H),
+            goal_box_left=goal_box_left, goal_box_right=goal_box_right,
+        )
+        goal_events = detect_goal_events(ball_track, field_geometry, 0.0, analysis_end_s)
+        game_segments = analyze_game_states(
+            ball_track, field_geometry, 0.0, analysis_end_s, goal_events=goal_events
+        )
+        state_summary = summarize_states(game_segments)
+        ball_coverage = ball_track.coverage_fraction(0.0, analysis_end_s)
+        print(
+            f"[game] Ball visible {ball_coverage * 100.0:.1f}% of the window | "
+            f"states: {state_summary} | goals flagged: {len(goal_events)}"
+        )
+        for goal in goal_events:
+            print(
+                f"[game] GOAL flagged at {format_time(goal.t + trim_offset)} "
+                f"({goal.side} goal, confidence {goal.confidence:.2f}): {goal.reason}"
+            )
+        emit_progress(
+            progress_callback,
+            "game_analysis",
+            0.845,
+            "Game-state analysis complete",
+            {
+                "ball_coverage_fraction": round(ball_coverage, 3),
+                "goal_event_count": len(goal_events),
+                "state_summary": state_summary,
+                "field_geometry_source": field_geometry.source,
+            },
+        )
+
+        # Guarantee every flagged goal gets a highlight interval, even when
+        # motion/audio thresholds missed it.
+        goal_intervals = [
+            (max(0.0, goal.t - max(pre_seconds, 4.0)), min(analysis_end_s, goal.t + max(post_seconds, 6.0)))
+            for goal in goal_events
+        ]
+        if goal_intervals:
+            intervals = merge_intervals(sorted(intervals + goal_intervals))
+            LOGGER.debug("intervals after adding %d goal interval(s): %d", len(goal_intervals), len(intervals))
 
         # Enforce minimum clip length and clamp to video duration
         clamped_intervals = []
@@ -1616,21 +1878,21 @@ def process_video_highlights(
             duration = e - s
             if duration < min_clip_duration:
                 e = min(s + min_clip_duration, video_duration)
-                print(f"[debug] Interval {i+1}: extended from {duration:.2f}s to {e-s:.2f}s (min={min_clip_duration}s)")
+                LOGGER.debug(f"Interval {i+1}: extended from {duration:.2f}s to {e-s:.2f}s (min={min_clip_duration}s)")
             else:
                 e = min(e, video_duration)
             if e > s:
                 clamped_intervals.append((s, e))
-                print(f"[debug] Interval {i+1}: [{s:.2f}s - {e:.2f}s] duration={e-s:.2f}s")
+                LOGGER.debug(f"Interval {i+1}: [{s:.2f}s - {e:.2f}s] duration={e-s:.2f}s")
         intervals = clamped_intervals
 
-        print(f"[debug] Final intervals after clamping: {len(intervals)}")
+        LOGGER.debug(f"Final intervals after clamping: {len(intervals)}")
 
         # Adjust intervals back to original video timestamps if trimmed
         original_intervals = [(s + trim_offset, e + trim_offset) for s, e in intervals]
         original_speed_intervals = [(s + trim_offset, e + trim_offset) for s, e in speed_intervals]
         original_audio_intervals = [(s + trim_offset, e + trim_offset) for s, e in audio_intervals]
-        print(f"[debug] Original video intervals (with trim offset +{trim_offset:.2f}s): {len(original_intervals)}")
+        LOGGER.debug(f"Original video intervals (with trim offset +{trim_offset:.2f}s): {len(original_intervals)}")
 
         if trim_offset > 0:
             print(f"[info] Found {len(intervals)} highlights. Adjusting timestamps to original video (offset: +{format_time(trim_offset)})")
@@ -1670,8 +1932,52 @@ def process_video_highlights(
                 "target_track": _trajectory_to_manifest_points(traj, trim_offset=trim_offset),
                 "ball_track": _trajectory_to_manifest_points(ball_traj, trim_offset=trim_offset),
             },
+            "game_analysis": {
+                "field_geometry": field_geometry.to_dict(),
+                "ball_track_stats": {
+                    **{key: float(value) for key, value in ball_track.stats.items()},
+                    "coverage_fraction": round(ball_coverage, 4),
+                },
+                "state_summary_s": state_summary,
+                "goal_events": [
+                    {**goal.to_dict(), "t": round(goal.t + trim_offset, 3)} for goal in goal_events
+                ],
+            },
         }
         tracking_manifest_path = write_tracking_manifest(output_dir, tracking_manifest)
+
+        # Shift game analysis outputs into the original-video timebase for
+        # bookmarks and the standalone game-state manifest.
+        original_goal_events = [
+            {**goal.to_dict(), "t": round(goal.t + trim_offset, 3)} for goal in goal_events
+        ]
+        original_game_states = [
+            {
+                **seg.to_dict(),
+                "start_s": round(seg.start_s + trim_offset, 3),
+                "end_s": round(seg.end_s + trim_offset, 3),
+            }
+            for seg in game_segments
+        ]
+        game_states_path = os.path.join(output_dir, "analysis_game_states.json")
+        with open(game_states_path, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                    "trim_offset_seconds": round(trim_offset, 3),
+                    "field_geometry": field_geometry.to_dict(),
+                    "ball_track_stats": {
+                        **{key: float(value) for key, value in ball_track.stats.items()},
+                        "coverage_fraction": round(ball_coverage, 4),
+                    },
+                    "state_summary_s": state_summary,
+                    "segments": original_game_states,
+                    "goal_events": original_goal_events,
+                },
+                handle,
+                indent=2,
+            )
+        print(f"[analysis] Game-state manifest: {game_states_path}")
         print(f"[analysis] Tracking manifest: {tracking_manifest_path}")
         emit_progress(
             progress_callback,
@@ -1709,12 +2015,18 @@ def process_video_highlights(
                 "inference_imgsz": int(inference_imgsz),
                 "detection_conf": round(float(detection_conf), 3),
                 "vid_stride": int(vid_stride),
+                "debug": bool(debug),
+                "debug_video": bool(debug_video),
+                "dump_training_data": bool(dump_training_data),
+                "goal_box_left": dict(goal_box_left or {}),
+                "goal_box_right": dict(goal_box_right or {}),
             },
             "stats": {
                 "speed_interval_count": len(speed_intervals),
                 "audio_interval_count": len(audio_intervals),
                 "fallback_interval_count": len(fallback_intervals),
                 "merged_interval_count": len(intervals),
+                "goal_event_count": len(goal_events),
                 "bookmark_count": 0,
             },
         }
@@ -1726,6 +2038,8 @@ def process_video_highlights(
             requested_targets=requested_targets,
             live_manifest_path=live_manifest_path,
             live_manifest_context=live_manifest_context,
+            goal_events=original_goal_events,
+            game_states=original_game_states,
         )
         emit_progress(
             progress_callback,
@@ -1741,8 +2055,11 @@ def process_video_highlights(
                 "audio_interval_count": len(audio_intervals),
                 "fallback_interval_count": len(fallback_intervals),
                 "merged_interval_count": len(intervals),
+                "goal_event_count": len(goal_events),
                 "bookmark_count": len(bookmarks),
             },
+            "goal_events": original_goal_events,
+            "game_states_path": game_states_path,
             "bookmarks": bookmarks,
         }
         manifest_path, csv_path = write_analysis_bookmark_files(output_dir, manifest)
@@ -1756,6 +2073,64 @@ def process_video_highlights(
             {"analysis_manifest_path": manifest_path, "analysis_table_csv_path": csv_path, "bookmark_count": len(bookmarks)},
         )
 
+        # --- Game-centric camera plan (center of the game + why) ---
+        camera_plan: Optional[CameraPlan] = None
+        need_camera_plan = camera_mode == "follow_ball" or debug_video or dump_training_data
+        if need_camera_plan:
+            emit_progress(progress_callback, "camera_plan", 0.945, "Planning game-centric camera path")
+            camera_plan = plan_camera(
+                ball_track=ball_track,
+                player_positions=player_positions,
+                geometry=field_geometry,
+                segments=game_segments,
+                start_seconds=0.0,
+                end_seconds=analysis_end_s,
+                fps=fps,
+                frame_size=(W, H),
+                base_zoom=zoom_factor if camera_mode != "wide" else 1.6,
+            )
+            print(f"[camera] Plan summary: {camera_plan.summary()}")
+
+        if dump_training_data and camera_plan is not None:
+            decisions_path = os.path.join(output_dir, "camera_decisions.jsonl")
+            with open(decisions_path, "w", encoding="utf-8") as handle:
+                for decision in camera_plan.decisions:
+                    row = decision.to_dict()
+                    row["t_source"] = round(row["t"] + trim_offset, 3)
+                    handle.write(json.dumps(row) + "\n")
+            ball_csv_path = os.path.join(output_dir, "ball_track.csv")
+            with open(ball_csv_path, "w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["t", "t_source", "x", "y"])
+                writer.writeheader()
+                for row in ball_track.to_rows():
+                    writer.writerow({**row, "t_source": round(row["t"] + trim_offset, 3)})
+            print(f"[training] Camera decisions: {decisions_path}")
+            print(f"[training] Ball track table: {ball_csv_path}")
+            emit_progress(
+                progress_callback,
+                "training_dump",
+                0.948,
+                "Training data written",
+                {"camera_decisions_path": decisions_path, "ball_track_csv_path": ball_csv_path},
+            )
+
+        if debug_video and camera_plan is not None:
+            debug_path = os.path.join(output_dir, "debug_camera_wide.mp4")
+            LOGGER.debug("Rendering annotated wide camera-decision video (center of the game + why)...")
+            emit_progress(progress_callback, "debug_video", 0.95, "Rendering camera-decision debug video")
+            try:
+                rendered_debug = render_camera_plan_video(
+                    video_path=processing_video,
+                    output_path=debug_path,
+                    plan=camera_plan,
+                    include_audio=True,
+                    debug_wide=True,
+                    geometry=field_geometry,
+                )
+                LOGGER.debug(f"Camera-decision video: {rendered_debug}")
+            except Exception as exc:
+                print(f"[warn] Debug video render failed: {exc}")
+
         if analysis_only:
             print("[analysis] Analysis-only run complete. Skipped clip rendering.")
             emit_progress(progress_callback, "completed", 0.98, "Analysis-only run complete")
@@ -1765,6 +2140,47 @@ def process_video_highlights(
         if render_full_follow_cam:
             if camera_mode == "wide":
                 print("[warn] Full follow-cam movie requested, but camera mode is wide. Skipping full zoom export.")
+            elif camera_mode == "follow_ball" and camera_plan is not None:
+                emit_progress(
+                    progress_callback,
+                    "rendering_full_zoom",
+                    0.955,
+                    "Rendering full game-camera movie",
+                    {"camera_mode": camera_mode, "zoom_factor": round(float(zoom_factor), 3)},
+                )
+
+                def _full_ball_progress(written_frames: int, total_frames: int) -> None:
+                    if total_frames <= 0:
+                        return
+                    fraction = min(1.0, max(0.0, float(written_frames) / float(total_frames)))
+                    emit_progress(
+                        progress_callback,
+                        "rendering_full_zoom",
+                        0.955 + (0.03 * fraction),
+                        "Rendering full game-camera movie",
+                        {"written_frames": int(written_frames), "total_frames": int(total_frames)},
+                    )
+
+                try:
+                    full_follow_cam_path = render_camera_plan_video(
+                        video_path=processing_video,
+                        output_path=os.path.join(output_dir, "full_follow_ball_zoom.mp4"),
+                        plan=camera_plan,
+                        include_audio=True,
+                        debug_wide=False,
+                        geometry=field_geometry,
+                        progress_callback=_full_ball_progress,
+                    )
+                    print(f"[follow-cam] Full game-camera movie: {full_follow_cam_path}")
+                except Exception as exc:
+                    print(f"[warn] Full game-camera render failed: {exc}")
+                emit_progress(
+                    progress_callback,
+                    "rendering_full_zoom",
+                    0.985,
+                    "Full zoom movie rendered" if full_follow_cam_path else "Full zoom movie render did not produce output",
+                    {"full_follow_cam_path": full_follow_cam_path or ""},
+                )
             else:
                 full_interval = (float(trim_offset), float(trim_offset + video_duration))
                 emit_progress(
@@ -1809,6 +2225,14 @@ def process_video_highlights(
         emit_progress(progress_callback, "rendering", 0.95, "Rendering highlight clips")
         if camera_mode == "wide":
             clip_paths = write_subclips(original_video, original_intervals, output_dir, max_workers=threads)
+        elif camera_mode == "follow_ball" and camera_plan is not None:
+            clip_paths = write_follow_ball_subclips(
+                processing_video,
+                intervals,
+                output_dir,
+                camera_plan,
+                field_geometry,
+            )
         else:
             clip_paths = write_follow_cam_subclips(
                 original_video,
@@ -1824,6 +2248,7 @@ def process_video_highlights(
 
         # Montage
         if clip_paths:
+            VideoFileClip, concatenate_videoclips = _import_moviepy()
             clips = []
             try:
                 clips = [VideoFileClip(p) for p in clip_paths]
@@ -1871,10 +2296,33 @@ def main():
     ap.add_argument("--speed-sensitivity", type=float, default=2.0, help="Speed detection sensitivity (lower = more sensitive, default: 2.0, old default was 3.0)")
     ap.add_argument("--audio-sensitivity", type=float, default=2.0, help="Audio peak detection sensitivity (lower = more sensitive, default: 2.0, old default was 3.0)")
     ap.add_argument("--analysis-only", action="store_true", help="Run detection/bookmark analysis without writing highlight clips")
-    ap.add_argument("--camera-mode", choices=sorted(FOLLOW_CAM_MODES), default="wide", help="Video framing mode for rendered clips")
-    ap.add_argument("--zoom-factor", type=float, default=1.6, help="Zoom factor for follow_player/follow_action camera modes")
+    ap.add_argument("--camera-mode", choices=sorted(FOLLOW_CAM_MODES), default="wide", help="Video framing mode for rendered clips (follow_ball = game-centric camera that tracks the ball)")
+    ap.add_argument("--zoom-factor", type=float, default=1.6, help="Zoom factor for follow camera modes")
     ap.add_argument("--render-full-follow-cam", action="store_true", help="Also render one continuous zoomed follow-cam movie for the processed window/full source")
+    ap.add_argument("--debug", action="store_true", help="Print full debug diagnostics to the console")
+    ap.add_argument("--log-file", type=str, default=None, help="Write a full DEBUG log (with timestamps) to this file")
+    ap.add_argument("--debug-video", action="store_true", help="Render debug_camera_wide.mp4: annotated wide video showing the center of the game, crop box, ball trail, and why each camera decision was made")
+    ap.add_argument("--dump-training-data", action="store_true", help="Write camera_decisions.jsonl and ball_track.csv for tuning/training")
+    ap.add_argument("--goal-box-left", type=str, default=None, help="Manual left goal box as x1,y1,x2,y2 (normalized 0-1 or pixels); overrides auto estimate")
+    ap.add_argument("--goal-box-right", type=str, default=None, help="Manual right goal box as x1,y1,x2,y2 (normalized 0-1 or pixels); overrides auto estimate")
     args = ap.parse_args()
+
+    def _parse_goal_box(raw: Optional[str], flag: str) -> Optional[Dict[str, float]]:
+        if not raw:
+            return None
+        parts = [item.strip() for item in raw.split(",")]
+        if len(parts) != 4:
+            print(f"Error: {flag} expects x1,y1,x2,y2 (got: {raw})")
+            sys.exit(1)
+        try:
+            x1, y1, x2, y2 = (float(item) for item in parts)
+        except ValueError:
+            print(f"Error: {flag} values must be numbers (got: {raw})")
+            sys.exit(1)
+        return {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
+
+    goal_box_left = _parse_goal_box(args.goal_box_left, "--goal-box-left")
+    goal_box_right = _parse_goal_box(args.goal_box_right, "--goal-box-right")
 
     # Interactive mode if video or output not provided
     if not args.video:
@@ -1979,6 +2427,12 @@ def main():
         camera_mode=args.camera_mode,
         zoom_factor=args.zoom_factor,
         render_full_follow_cam=args.render_full_follow_cam,
+        debug=args.debug,
+        log_file=args.log_file,
+        debug_video=args.debug_video,
+        dump_training_data=args.dump_training_data,
+        goal_box_left=goal_box_left,
+        goal_box_right=goal_box_right,
     )
 
     if not success:
