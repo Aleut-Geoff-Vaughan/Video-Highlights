@@ -35,7 +35,9 @@ from .game_tracking import (
     BALL_SOURCE_DETECTED,
     GOAL_STATES,
     RESTART_STATES,
+    SET_PIECE_STATES,
     STATE_BALL_LOST,
+    STATE_CORNER_SETUP,
     STATE_IN_PLAY,
     STATE_RESTART_TOUCHLINE,
     BallTrack,
@@ -57,12 +59,27 @@ class CameraPlannerConfig:
     action_radius_frac: float = 0.22
     # After losing the ball, hold the camera this long before drifting.
     hold_last_s: float = 1.2
-    # Critically damped spring stiffness (rad/s) for camera motion.
-    spring_omega: float = 3.0
-    # Max pan speed as crop-widths per second.
+    # Offline zero-phase smoothing time constants: the plan is computed for
+    # the whole video before rendering, so smoothing looks BOTH ways in time.
+    # The camera glides and starts moving slightly before the play does -
+    # the operator-like anticipation commercial systems are known for.
+    smooth_time_constant_s: float = 0.45
+    zoom_smooth_time_constant_s: float = 0.8
+    # Motion limits for cinematic panning (crop-widths per second / s^2).
     max_pan_speed_crop_frac: float = 1.6
-    # Zoom easing rate (per second).
-    zoom_smooth_rate: float = 1.6
+    max_pan_accel_crop_frac: float = 3.0
+    # --- Goal-threat framing ---
+    # When the ball is within this fraction of the field width from a goal
+    # and attacking it, blend the aim toward the goal and pick a zoom that
+    # keeps BOTH ball and goal in frame (corners arriving, crosses, shots).
+    threat_zoom_dist_frac: float = 0.32
+    threat_goal_blend_max: float = 0.35
+    # Near-goal attacks may tighten up to this multiple of the base zoom as
+    # the ball closes in on the goal.
+    threat_tighten_scale: float = 1.3
+    # Margin (fraction of frame) kept around the ball/goal pair when zooming
+    # to fit both.
+    both_in_frame_margin_frac: float = 0.12
     # Zoom levels relative to the configured base zoom.
     lost_zoom_scale: float = 0.8
     restart_zoom_cap: float = 1.35
@@ -274,10 +291,9 @@ def plan_camera(
         base_zoom=base_zoom,
     )
 
-    # Camera physical state (position + velocity for the damped spring).
-    cam_pos: Optional[Tuple[float, float]] = None
-    cam_vel = (0.0, 0.0)
-    zoom = base_zoom
+    # ------------------------------------------------------------------
+    # Phase 1: one RAW aim point + zoom per frame, with reasons.
+    # ------------------------------------------------------------------
     last_ball_seen_t: Optional[float] = None
     last_ball_xy: Optional[Tuple[float, float]] = None
 
@@ -285,6 +301,24 @@ def plan_camera(
     restart_zoom = max(cfg.min_zoom, min(base_zoom, cfg.restart_zoom_cap))
     goal_zoom = max(cfg.min_zoom, base_zoom * cfg.goal_zoom_scale)
     infield_offset = cfg.goal_infield_offset_frac * geometry.width
+    margin = cfg.both_in_frame_margin_frac
+
+    def _zoom_to_frame_both(a: Tuple[float, float], b: Tuple[float, float],
+                            max_zoom: float) -> float:
+        """Widest-necessary zoom that keeps points a and b in the crop."""
+        half_w = abs(a[0] - b[0]) / 2.0 + margin * frame_w
+        half_h = abs(a[1] - b[1]) / 2.0 + margin * frame_h
+        fit = min(frame_w / (2.0 * half_w), frame_h / (2.0 * half_h))
+        return max(cfg.min_zoom, min(max_zoom, fit))
+
+    raw_targets = np.empty((frame_count, 2), dtype=np.float64)
+    raw_zooms = np.empty(frame_count, dtype=np.float64)
+    metas: List[Tuple[str, str, str, float, Optional[Tuple[float, float, str]]]] = []
+    # Hard framing constraints: points that MUST stay inside the crop for
+    # this frame (the goal during set pieces/restarts/goal holds, ball+goal
+    # during a goal threat). Enforced after smoothing so the offline filter
+    # can never ease them out of frame.
+    keep_points: List[List[Tuple[float, float]]] = []
 
     for index in range(frame_count):
         t = start_seconds + index * dt
@@ -302,6 +336,7 @@ def plan_camera(
         focus = "frame_center"
         reason = state_reason or "no signal"
         confidence = 0.2
+        keeps: List[Tuple[float, float]] = []
 
         if state in GOAL_STATES and segment is not None:
             goal = geometry.goal_for_side(segment.side or "left")
@@ -312,6 +347,28 @@ def plan_camera(
             focus = f"goal_{goal.side}"
             confidence = 0.9
             reason = state_reason or f"holding on {goal.side} goal after goal"
+            keeps = [goal.center]
+        elif state in SET_PIECE_STATES and segment is not None:
+            goal = geometry.goal_for_side(segment.side or "left")
+            anchor = last_ball_xy if last_ball_xy is not None else goal.center
+            if ball is not None:
+                anchor = (ball[0], ball[1])
+            target = (
+                anchor[0] * 0.45 + goal.center[0] * 0.55,
+                anchor[1] * 0.45 + goal.center[1] * 0.55,
+            )
+            target_zoom = _zoom_to_frame_both(anchor, goal.center, base_zoom)
+            focus = "set_piece"
+            confidence = 0.85
+            keeps = [goal.center, anchor]
+            if state == STATE_CORNER_SETUP:
+                reason = state_reason or (
+                    f"corner kick setup - wide framing of the corner and the {goal.side} goal"
+                )
+            else:
+                reason = state_reason or (
+                    f"free kick setup - keeping the {goal.side} goal in view during the run-up"
+                )
         elif state in RESTART_STATES and segment is not None:
             if state == STATE_RESTART_TOUCHLINE:
                 anchor = last_ball_xy or ((geometry.x_min + geometry.x_max) / 2.0,
@@ -320,6 +377,7 @@ def plan_camera(
                 focus = "exit_point"
                 confidence = 0.6
                 reason = state_reason or "ball out over touchline - holding at exit point"
+                keeps = [anchor]
             else:
                 goal = geometry.goal_for_side(segment.side or "left")
                 gx, gy = goal.center
@@ -330,6 +388,7 @@ def plan_camera(
                 reason = state_reason or (
                     f"ball out near {goal.side} goal - staying on the goal until play restarts"
                 )
+                keeps = [goal.center]
             target_zoom = restart_zoom
         elif ball is not None:
             bx, by, source = ball
@@ -357,8 +416,29 @@ def plan_camera(
             target_zoom = max(
                 cfg.min_zoom, base_zoom * (1.0 - cfg.fast_ball_zoom_out_frac * speed_frac)
             )
+            # Goal-threat framing: ball attacking a goal -> aim between ball
+            # and goal, zoom to keep both in frame; the shot naturally
+            # tightens as the ball closes in (corners arriving, crosses,
+            # shots on target).
+            threat_r = cfg.threat_zoom_dist_frac * geometry.width
+            goal = geometry.left_goal if bx - geometry.x_min < geometry.x_max - bx else geometry.right_goal
+            gx, gy = goal.center
+            dist = math.hypot(bx - gx, by - gy)
+            attacking = (vx < -10.0 if goal.side == "left" else vx > 10.0)
+            if dist <= threat_r and (attacking or dist <= 0.55 * threat_r):
+                closeness = 1.0 - (dist / threat_r)
+                w = cfg.threat_goal_blend_max * closeness
+                target = (target[0] * (1.0 - w) + gx * w, target[1] * (1.0 - w) + gy * w)
+                # Fit ball AND goal; the shot tightens (beyond base zoom, up
+                # to threat_tighten_scale) as the ball closes on the goal.
+                target_zoom = _zoom_to_frame_both(
+                    (bx, by), (gx, gy), base_zoom * cfg.threat_tighten_scale
+                )
+                focus = "ball_goal_threat"
+                reason = f"attacking the {goal.side} goal - framing ball and goal together"
+                confidence = max(confidence, 0.9)
+                keeps = [(bx, by), (gx, gy)]
         else:
-            # Ball not visible: hold briefly, then follow the player cluster.
             recently_seen = (
                 last_ball_seen_t is not None and (t - last_ball_seen_t) <= cfg.hold_last_s
             )
@@ -384,36 +464,69 @@ def plan_camera(
                     reason = "no ball and no players visible - centering frame"
                 target_zoom = lost_zoom
 
-        # --- Smooth zoom first, then motion, then clamp to legal crop. ---
-        zoom += (target_zoom - zoom) * min(1.0, cfg.zoom_smooth_rate * dt)
-        zoom = max(cfg.min_zoom, zoom)
+        clamped = _clamp_center(target, (frame_w, frame_h), max(cfg.min_zoom, target_zoom))
+        raw_targets[index, 0] = clamped[0]
+        raw_targets[index, 1] = clamped[1]
+        raw_zooms[index] = max(cfg.min_zoom, target_zoom)
+        metas.append((state, focus, reason, confidence, ball))
+        keep_points.append(keeps)
 
-        clamped_target = _clamp_center(target, (frame_w, frame_h), zoom)
+    # ------------------------------------------------------------------
+    # Phase 2: offline zero-phase smoothing + physical motion limits.
+    # ------------------------------------------------------------------
+    smoothed_x = _zero_phase_smooth(raw_targets[:, 0], dt, cfg.smooth_time_constant_s)
+    smoothed_y = _zero_phase_smooth(raw_targets[:, 1], dt, cfg.smooth_time_constant_s)
+    smoothed_zoom = _zero_phase_smooth(raw_zooms, dt, cfg.zoom_smooth_time_constant_s)
 
-        if cam_pos is None:
-            cam_pos = clamped_target
-            cam_vel = (0.0, 0.0)
-        else:
-            omega = cfg.spring_omega
-            ax = (omega * omega) * (clamped_target[0] - cam_pos[0]) - 2.0 * omega * cam_vel[0]
-            ay = (omega * omega) * (clamped_target[1] - cam_pos[1]) - 2.0 * omega * cam_vel[1]
-            cam_vel = (cam_vel[0] + ax * dt, cam_vel[1] + ay * dt)
-            crop_w = frame_w / zoom
-            max_speed = cfg.max_pan_speed_crop_frac * crop_w
-            vel_mag = math.hypot(*cam_vel)
-            if vel_mag > max_speed > 0:
-                scale = max_speed / vel_mag
-                cam_vel = (cam_vel[0] * scale, cam_vel[1] * scale)
-            cam_pos = (cam_pos[0] + cam_vel[0] * dt, cam_pos[1] + cam_vel[1] * dt)
+    cam_x, cam_y = float(smoothed_x[0]), float(smoothed_y[0])
+    vel_x = vel_y = 0.0
 
-        cam_pos = _clamp_center(cam_pos, (frame_w, frame_h), zoom)
+    for index in range(frame_count):
+        zoom = max(cfg.min_zoom, float(smoothed_zoom[index]))
+        crop_w = frame_w / zoom
+        max_speed = cfg.max_pan_speed_crop_frac * crop_w
+        max_accel = cfg.max_pan_accel_crop_frac * crop_w
 
+        desired_vx = (float(smoothed_x[index]) - cam_x) / dt
+        desired_vy = (float(smoothed_y[index]) - cam_y) / dt
+        dvx, dvy = desired_vx - vel_x, desired_vy - vel_y
+        dv_mag = math.hypot(dvx, dvy)
+        max_dv = max_accel * dt
+        if dv_mag > max_dv > 0:
+            scale = max_dv / dv_mag
+            dvx *= scale
+            dvy *= scale
+        vel_x += dvx
+        vel_y += dvy
+        v_mag = math.hypot(vel_x, vel_y)
+        if v_mag > max_speed > 0:
+            scale = max_speed / v_mag
+            vel_x *= scale
+            vel_y *= scale
+        cam_x += vel_x * dt
+        cam_y += vel_y * dt
+        cam_x, cam_y = _clamp_center((cam_x, cam_y), (frame_w, frame_h), zoom)
+
+        # Hard framing constraints beat smoothing: shift the crop the
+        # minimum needed to keep the anchors (goal, restart ball) in frame.
+        for keep_x, keep_y in keep_points[index]:
+            pad = 6.0
+            keep_half_w = frame_w / (2.0 * zoom) - pad
+            keep_half_h = frame_h / (2.0 * zoom) - pad
+            if keep_half_w > 0:
+                cam_x = min(max(cam_x, keep_x - keep_half_w), keep_x + keep_half_w)
+            if keep_half_h > 0:
+                cam_y = min(max(cam_y, keep_y - keep_half_h), keep_y + keep_half_h)
+        if keep_points[index]:
+            cam_x, cam_y = _clamp_center((cam_x, cam_y), (frame_w, frame_h), zoom)
+
+        state, focus, reason, confidence, ball = metas[index]
         plan.decisions.append(
             CameraDecision(
                 index=index,
-                t=float(t),
-                center_x=float(cam_pos[0]),
-                center_y=float(cam_pos[1]),
+                t=float(start_seconds + index * dt),
+                center_x=float(cam_x),
+                center_y=float(cam_y),
                 zoom=float(zoom),
                 state=state,
                 focus=focus,
@@ -422,10 +535,33 @@ def plan_camera(
                 ball_x=float(ball[0]) if ball is not None else None,
                 ball_y=float(ball[1]) if ball is not None else None,
                 ball_source=ball[2] if ball is not None else None,
-                target_x=float(clamped_target[0]),
-                target_y=float(clamped_target[1]),
+                target_x=float(raw_targets[index, 0]),
+                target_y=float(raw_targets[index, 1]),
             )
         )
 
     LOGGER.info("camera plan built: %s", plan.summary())
     return plan
+
+
+def _zero_phase_smooth(values: np.ndarray, dt: float, tau: float) -> np.ndarray:
+    """Forward+backward exponential smoothing (zero phase lag).
+
+    Because the whole plan exists before rendering, the backward pass lets
+    the camera begin easing toward upcoming action BEFORE it happens -
+    smooth, anticipatory motion instead of reactive chasing.
+    """
+    if tau <= 0 or len(values) < 3:
+        return values.astype(np.float64, copy=True)
+    alpha = dt / (tau + dt)
+    fwd = np.empty(len(values), dtype=np.float64)
+    acc = float(values[0])
+    for i in range(len(values)):
+        acc += alpha * (float(values[i]) - acc)
+        fwd[i] = acc
+    out = np.empty(len(values), dtype=np.float64)
+    acc = fwd[-1]
+    for i in range(len(values) - 1, -1, -1):
+        acc += alpha * (fwd[i] - acc)
+        out[i] = acc
+    return out

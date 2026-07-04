@@ -105,6 +105,26 @@ What it does:
    blends toward the nearby-player centroid, zooms out when the ball is lost,
    and holds on goals/restarts.
 
+Set pieces and cards:
+
+1. **Set-piece detection**: a stationary ball followed by a kick is
+   classified by location into corner kicks, free kicks, penalties, goal
+   kicks, and kickoffs. During a **free kick near goal** the camera keeps
+   the threatened goal in view; during a **corner** it frames the corner and
+   the goal together, then tightens as the ball comes in. A general
+   goal-threat mode keeps ball AND goal in frame whenever an attack closes
+   in on a goal.
+2. **Cinematic smoothing**: the camera path is planned offline for the whole
+   video and smoothed with zero-phase (future-aware) filtering plus speed
+   and acceleration limits - the camera glides and anticipates play instead
+   of chasing it.
+3. **Yellow/red card flagging** (on by default; disable with
+   `--no-card-detection`): stopped-play windows are scanned for the raised
+   card signature (small saturated yellow/red patch persisting across
+   frames). Detections become `yellow_card` / `red_card` bookmarks with
+   confidence, and review crops are saved to `card_crops/` for
+   verification and training.
+
 Debug & training outputs:
 
 1. `--debug` prints every diagnostic; `--log-file` captures a full timestamped

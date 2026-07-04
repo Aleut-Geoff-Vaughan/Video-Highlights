@@ -700,6 +700,7 @@ class JobRunner:
                 dump_training_data=bool(config.get("dump_training_data", False)),
                 goal_box_left=dict(config.get("goal_box_left") or {}) if isinstance(config.get("goal_box_left"), dict) else None,
                 goal_box_right=dict(config.get("goal_box_right") or {}) if isinstance(config.get("goal_box_right"), dict) else None,
+                detect_cards=bool(config.get("detect_cards", True)),
             )
 
             artifacts = sorted(str(path.resolve()) for path in Path(output_dir).glob("*.mp4"))
