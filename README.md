@@ -441,11 +441,35 @@ docker build -t <username>/video-highlights:latest .
 docker push <username>/video-highlights:latest
 ```
 
-Run the published image without cloning the repo:
+Run the FULL product (API + worker + all web UIs) without cloning the repo:
 
 ```bash
 docker pull geoffvaughan/video-highlights:latest
-docker run --rm -p 8000:8000 geoffvaughan/video-highlights:latest
+docker run -d --name video-highlights \
+  -p 8000:8000 -p 8501:8501 -p 8502:8502 -p 8503:8503 -p 8504:8504 \
+  -v C:\VideoHighlights\data:/app/data \
+  geoffvaughan/video-highlights:latest
+```
+
+Then open:
+
+- Processing portal (main UI): http://localhost:8504
+- API docs: http://localhost:8000/docs
+- API client / global admin / tenant admin: 8501 / 8502 / 8503
+
+In Docker Desktop's "Run a new container" dialog this means: map every
+listed port to the same host port, and add a volume from a Windows folder
+(e.g. `C:\VideoHighlights\data`) to `/app/data` so the database, uploads,
+and rendered outputs persist. No environment variables are required - the
+image ships single-container defaults (override any `VH_*` value with `-e`
+if needed).
+
+One-off CLI processing of a single video (no UI):
+
+```bash
+docker run --rm -v C:\Path\To\Videos:/media geoffvaughan/video-highlights:latest \
+  python VideoHighlights.py --video /media/match.mp4 --out /media/highlights_out \
+  --camera-mode follow_ball --zoom-factor 1.8 --debug-video
 ```
 
 ## Docker and GPU Notes

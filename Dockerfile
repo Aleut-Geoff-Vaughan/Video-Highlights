@@ -16,7 +16,12 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install --upgrade pip && pip install -r /app/requirements.txt
 
 COPY . /app
+RUN chmod +x /app/docker/start_all.sh
 
-EXPOSE 8000 8501 8502 8503
+EXPOSE 8000 8501 8502 8503 8504
 
-CMD ["python", "-m", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Default: full stack in one container (API + worker + all web portals) so a
+# plain `docker run` of the published image delivers the complete product.
+# docker-compose services each override this with their own single-process
+# command.
+CMD ["/app/docker/start_all.sh"]
