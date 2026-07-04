@@ -105,6 +105,26 @@ What it does:
    blends toward the nearby-player centroid, zooms out when the ball is lost,
    and holds on goals/restarts.
 
+Set pieces and cards:
+
+1. **Set-piece detection**: a stationary ball followed by a kick is
+   classified by location into corner kicks, free kicks, penalties, goal
+   kicks, and kickoffs. During a **free kick near goal** the camera keeps
+   the threatened goal in view; during a **corner** it frames the corner and
+   the goal together, then tightens as the ball comes in. A general
+   goal-threat mode keeps ball AND goal in frame whenever an attack closes
+   in on a goal.
+2. **Cinematic smoothing**: the camera path is planned offline for the whole
+   video and smoothed with zero-phase (future-aware) filtering plus speed
+   and acceleration limits - the camera glides and anticipates play instead
+   of chasing it.
+3. **Yellow/red card flagging** (on by default; disable with
+   `--no-card-detection`): stopped-play windows are scanned for the raised
+   card signature (small saturated yellow/red patch persisting across
+   frames). Detections become `yellow_card` / `red_card` bookmarks with
+   confidence, and review crops are saved to `card_crops/` for
+   verification and training.
+
 Debug & training outputs:
 
 1. `--debug` prints every diagnostic; `--log-file` captures a full timestamped
@@ -421,11 +441,35 @@ docker build -t <username>/video-highlights:latest .
 docker push <username>/video-highlights:latest
 ```
 
-Run the published image without cloning the repo:
+Run the FULL product (API + worker + all web UIs) without cloning the repo:
 
 ```bash
 docker pull geoffvaughan/video-highlights:latest
-docker run --rm -p 8000:8000 geoffvaughan/video-highlights:latest
+docker run -d --name video-highlights \
+  -p 8000:8000 -p 8501:8501 -p 8502:8502 -p 8503:8503 -p 8504:8504 \
+  -v C:\VideoHighlights\data:/app/data \
+  geoffvaughan/video-highlights:latest
+```
+
+Then open:
+
+- Processing portal (main UI): http://localhost:8504
+- API docs: http://localhost:8000/docs
+- API client / global admin / tenant admin: 8501 / 8502 / 8503
+
+In Docker Desktop's "Run a new container" dialog this means: map every
+listed port to the same host port, and add a volume from a Windows folder
+(e.g. `C:\VideoHighlights\data`) to `/app/data` so the database, uploads,
+and rendered outputs persist. No environment variables are required - the
+image ships single-container defaults (override any `VH_*` value with `-e`
+if needed).
+
+One-off CLI processing of a single video (no UI):
+
+```bash
+docker run --rm -v C:\Path\To\Videos:/media geoffvaughan/video-highlights:latest \
+  python VideoHighlights.py --video /media/match.mp4 --out /media/highlights_out \
+  --camera-mode follow_ball --zoom-factor 1.8 --debug-video
 ```
 
 ## Docker and GPU Notes

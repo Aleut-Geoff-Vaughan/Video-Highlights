@@ -77,9 +77,12 @@ from backend.services.game_tracking import (
     analyze_game_states,
     build_ball_track,
     detect_goal_events,
+    detect_set_pieces,
     estimate_field_geometry,
+    overlay_set_piece_states,
     summarize_states,
 )
+from backend.services.card_detection import detect_card_events, stopped_play_windows
 from backend.services.camera_planner import CameraPlan, plan_camera, slice_plan
 from backend.services.camera_render import render_camera_plan_video
 
@@ -433,6 +436,8 @@ def build_analysis_bookmarks(
     live_manifest_context: Optional[Dict[str, object]] = None,
     goal_events: Optional[List[Dict[str, object]]] = None,
     game_states: Optional[List[Dict[str, object]]] = None,
+    card_events: Optional[List[Dict[str, object]]] = None,
+    set_piece_events: Optional[List[Dict[str, object]]] = None,
 ) -> List[Dict[str, object]]:
     """Build the bookmark table for a run.
 
@@ -446,6 +451,14 @@ def build_analysis_bookmarks(
     context = dict(live_manifest_context or {})
     goal_rows = list(goal_events or [])
     state_rows = list(game_states or [])
+    card_rows = list(card_events or [])
+    set_piece_rows = list(set_piece_events or [])
+
+    def _row_within(rows: List[Dict[str, object]], key: str, start_s: float, end_s: float) -> Optional[Dict[str, object]]:
+        for row in rows:
+            if start_s <= float(row.get(key, -1.0)) <= end_s:
+                return row
+        return None
 
     def _state_label_at(t: float) -> Optional[str]:
         for row in state_rows:
@@ -525,6 +538,40 @@ def build_analysis_bookmarks(
             if has_audio_signal:
                 # Crowd noise corroborating a detected goal.
                 confidence = float(min(0.99, confidence + 0.05))
+
+        # Referee cards outrank set pieces; both defer to detected goals.
+        if goal_row is None:
+            card_row = _row_within(card_rows, "t", start_s, end_s)
+            if card_row is not None:
+                event_type = str(card_row.get("kind") or "yellow_card")
+                label = f"{event_type}_detected"
+                occurred_at_s = float(card_row.get("t", occurred_at_s))
+                confidence = float(min(0.99, max(confidence, float(card_row.get("confidence", 0.0)))))
+                if not has_speed_signal and not has_audio_signal:
+                    sources = []
+                if "vision" not in sources:
+                    sources.append("vision")
+                signals["card_reason"] = card_row.get("reason")
+                if card_row.get("crop_path"):
+                    signals["card_crop_path"] = card_row.get("crop_path")
+            else:
+                sp_row = _row_within(set_piece_rows, "t_kick", start_s, end_s)
+                if sp_row is not None and sp_row.get("kind") in {
+                    "corner_kick", "free_kick", "penalty_kick", "goal_kick", "kickoff",
+                }:
+                    event_type = str(sp_row["kind"])
+                    label = f"{event_type}_detected"
+                    occurred_at_s = float(sp_row.get("t_kick", occurred_at_s))
+                    confidence = float(min(0.99, max(confidence, 0.8)))
+                    if not has_speed_signal and not has_audio_signal:
+                        sources = []
+                    if "ball_tracking" not in sources:
+                        sources.append("ball_tracking")
+                    signals["set_piece_side"] = sp_row.get("side")
+                    signals["set_piece_reason"] = sp_row.get("reason")
+
+        if not sources:
+            sources.append("motion")
 
         game_state = _state_label_at(occurred_at_s)
 
@@ -1665,6 +1712,7 @@ def process_video_highlights(
     dump_training_data: bool = False,
     goal_box_left: Optional[Dict[str, float]] = None,
     goal_box_right: Optional[Dict[str, float]] = None,
+    detect_cards: bool = True,
 ) -> bool:
     """Public pipeline entry point used by the CLI, GUI, and API worker.
 
@@ -1708,6 +1756,7 @@ def process_video_highlights(
             dump_training_data=dump_training_data,
             goal_box_left=goal_box_left,
             goal_box_right=goal_box_right,
+            detect_cards=detect_cards,
         )
     finally:
         teardown_run_logging(run_log_handler)
@@ -1778,6 +1827,7 @@ def _process_video_highlights_impl(
     dump_training_data: bool = False,
     goal_box_left: Optional[Dict[str, float]] = None,
     goal_box_right: Optional[Dict[str, float]] = None,
+    detect_cards: bool = True,
 ) -> bool:
     """
     Core video highlights processing function.
@@ -2045,6 +2095,29 @@ def _process_video_highlights_impl(
         game_segments = analyze_game_states(
             ball_track, field_geometry, 0.0, analysis_end_s, goal_events=goal_events
         )
+        set_piece_events = detect_set_pieces(ball_track, field_geometry, 0.0, analysis_end_s)
+        game_segments = overlay_set_piece_states(game_segments, set_piece_events)
+        for sp in set_piece_events:
+            print(f"[game] {sp.kind} at {format_time(sp.t_kick + trim_offset)}: {sp.reason}")
+
+        card_events = []
+        if detect_cards:
+            emit_progress(progress_callback, "game_analysis", 0.842, "Scanning stopped play for referee cards")
+            try:
+                card_events = detect_card_events(
+                    processing_video,
+                    stopped_play_windows(game_segments),
+                    debug_dir=os.path.join(output_dir, "card_crops"),
+                    ball_track=ball_track,
+                )
+            except Exception as card_exc:
+                print(f"[warn] Card detection failed: {card_exc}")
+            for card in card_events:
+                print(
+                    f"[game] {card.kind.replace('_', ' ').upper()} flagged at "
+                    f"{format_time(card.t + trim_offset)} (confidence {card.confidence:.2f})"
+                )
+
         state_summary = summarize_states(game_segments)
         ball_coverage = ball_track.coverage_fraction(0.0, analysis_end_s)
         print(
@@ -2075,9 +2148,24 @@ def _process_video_highlights_impl(
             (max(0.0, goal.t - max(pre_seconds, 4.0)), min(analysis_end_s, goal.t + max(post_seconds, 6.0)))
             for goal in goal_events
         ]
-        if goal_intervals:
-            intervals = merge_intervals(sorted(intervals + goal_intervals))
-            LOGGER.debug("intervals after adding %d goal interval(s): %d", len(goal_intervals), len(intervals))
+        threat_set_pieces = [
+            sp for sp in set_piece_events
+            if sp.kind in {"corner_kick", "penalty_kick"}
+            or (sp.kind == "free_kick" and sp.side is not None)
+        ]
+        event_intervals = goal_intervals + [
+            (max(0.0, sp.t_kick - 3.0), min(analysis_end_s, sp.t_kick + 7.0))
+            for sp in threat_set_pieces
+        ] + [
+            (max(0.0, card.t - 4.0), min(analysis_end_s, card.t + 6.0))
+            for card in card_events
+        ]
+        if event_intervals:
+            intervals = merge_intervals(sorted(intervals + event_intervals))
+            LOGGER.debug(
+                "intervals after adding %d goal/%d set-piece/%d card interval(s): %d",
+                len(goal_intervals), len(threat_set_pieces), len(card_events), len(intervals),
+            )
 
         # Enforce minimum clip length and clamp to video duration
         clamped_intervals = []
@@ -2113,6 +2201,17 @@ def _process_video_highlights_impl(
         }
         original_goal_events = [
             {**goal.to_dict(), "t": round(goal.t + trim_offset, 3)} for goal in goal_events
+        ]
+        original_set_pieces = [
+            {
+                **sp.to_dict(),
+                "t_start": round(sp.t_start + trim_offset, 3),
+                "t_kick": round(sp.t_kick + trim_offset, 3),
+            }
+            for sp in set_piece_events
+        ]
+        original_card_events = [
+            {**card.to_dict(), "t": round(card.t + trim_offset, 3)} for card in card_events
         ]
 
         tracking_manifest = {
@@ -2178,6 +2277,8 @@ def _process_video_highlights_impl(
                     "state_summary_s": state_summary,
                     "segments": original_game_states,
                     "goal_events": original_goal_events,
+                    "set_piece_events": original_set_pieces,
+                    "card_events": original_card_events,
                 },
                 handle,
                 indent=2,
@@ -2245,6 +2346,8 @@ def _process_video_highlights_impl(
             live_manifest_context=live_manifest_context,
             goal_events=original_goal_events,
             game_states=original_game_states,
+            card_events=original_card_events,
+            set_piece_events=original_set_pieces,
         )
         emit_progress(
             progress_callback,
@@ -2515,6 +2618,7 @@ def main():
     ap.add_argument("--dump-training-data", action="store_true", help="Write camera_decisions.jsonl and ball_track.csv for tuning/training")
     ap.add_argument("--goal-box-left", type=str, default=None, help="Manual left goal box as x1,y1,x2,y2 (normalized 0-1 or pixels); overrides auto estimate")
     ap.add_argument("--goal-box-right", type=str, default=None, help="Manual right goal box as x1,y1,x2,y2 (normalized 0-1 or pixels); overrides auto estimate")
+    ap.add_argument("--no-card-detection", action="store_true", help="Disable yellow/red card flagging (enabled by default)")
     args = ap.parse_args()
 
     def _parse_goal_box(raw: Optional[str], flag: str) -> Optional[Dict[str, float]]:
@@ -2643,6 +2747,7 @@ def main():
         dump_training_data=args.dump_training_data,
         goal_box_left=goal_box_left,
         goal_box_right=goal_box_right,
+        detect_cards=not args.no_card_detection,
     )
 
     if not success:

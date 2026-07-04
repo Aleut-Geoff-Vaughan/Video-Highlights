@@ -60,7 +60,9 @@ def test_plan_follows_moving_ball() -> None:
     xs = [d.center_x for d in plan.decisions]
     assert xs[-1] > xs[0] + 400.0  # camera panned with the ball
     assert all(d.reason for d in plan.decisions)
-    following = [d for d in plan.decisions if d.focus in {"ball", "ball_lead"}]
+    # The run ends near the right goal, so late frames legitimately switch
+    # to goal-threat framing - still ball-driven camera work.
+    following = [d for d in plan.decisions if d.focus in {"ball", "ball_lead", "ball_goal_threat"}]
     assert len(following) >= 50
     assert plan.summary()["mean_confidence"] > 0.8
 

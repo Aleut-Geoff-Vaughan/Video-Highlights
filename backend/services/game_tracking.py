@@ -42,9 +42,12 @@ STATE_RESTART_RIGHT = "restart_right"
 STATE_RESTART_TOUCHLINE = "restart_touchline"
 STATE_GOAL_LEFT = "goal_left"
 STATE_GOAL_RIGHT = "goal_right"
+STATE_CORNER_SETUP = "corner_kick_setup"
+STATE_FREE_KICK_SETUP = "free_kick_setup"
 
 RESTART_STATES = {STATE_RESTART_LEFT, STATE_RESTART_RIGHT, STATE_RESTART_TOUCHLINE}
 GOAL_STATES = {STATE_GOAL_LEFT, STATE_GOAL_RIGHT}
+SET_PIECE_STATES = {STATE_CORNER_SETUP, STATE_FREE_KICK_SETUP}
 
 
 # ---------------------------------------------------------------------------
@@ -574,6 +577,21 @@ class GameStateConfig:
     # Goal events below this confidence are dropped (e.g. a ball that merely
     # vanishes near a goal as the recording ends).
     min_goal_confidence: float = 0.65
+    # --- Set pieces (corners, free kicks, goal kicks, kickoffs) ---
+    # The ball must sit still (within the radius) at least this long.
+    set_piece_min_stationary_s: float = 1.2
+    set_piece_stationary_radius_frac: float = 0.012  # of frame width
+    # ...and then accelerate away at least this fast to count as the kick.
+    set_piece_kick_speed_frame_widths_per_s: float = 0.15
+    # Location classification (fractions of field size).
+    corner_radius_frac: float = 0.06
+    goal_kick_zone_depth_frac: float = 0.12
+    goal_kick_zone_half_height_frac: float = 0.25
+    penalty_depth_range_frac: Tuple[float, float] = (0.06, 0.18)
+    penalty_half_height_frac: float = 0.12
+    # A free kick within this distance of a goal line threatens that goal,
+    # so the camera must keep the goal in view during the run-up.
+    free_kick_threat_frac: float = 0.38
 
 
 @dataclass
@@ -1015,6 +1033,184 @@ def analyze_game_states(
             seg.start_s, seg.end_s, seg.state, f"[{seg.side}]" if seg.side else "", seg.reason,
         )
     return segments
+
+
+@dataclass
+class SetPieceEvent:
+    """A dead-ball restart: the ball sat still, then was kicked."""
+
+    kind: str  # corner_kick | free_kick | penalty_kick | goal_kick | kickoff
+    t_start: float  # when the ball became stationary
+    t_kick: float  # when it accelerated away
+    x: float
+    y: float
+    side: Optional[str]  # threatened goal ("left"/"right"), if any
+    reason: str = ""
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "kind": self.kind,
+            "t_start": round(self.t_start, 3),
+            "t_kick": round(self.t_kick, 3),
+            "x": round(self.x, 1),
+            "y": round(self.y, 1),
+            "side": self.side,
+            "reason": self.reason,
+        }
+
+
+def detect_set_pieces(
+    ball_track: BallTrack,
+    geometry: FieldGeometry,
+    start_s: float,
+    end_s: float,
+    config: Optional[GameStateConfig] = None,
+) -> List[SetPieceEvent]:
+    """Find dead-ball restarts from the stationary-ball + kick signature.
+
+    A set piece is a window where the visible ball stays inside a small
+    radius for a minimum time and then accelerates away. The location of the
+    stationary spot classifies it: field corner -> corner kick, in front of a
+    goal on the penalty spot -> penalty, inside the goal-kick zone -> goal
+    kick, center circle -> kickoff, anywhere else -> free kick (with the
+    threatened goal recorded when it is within shooting range).
+    """
+    cfg = config or GameStateConfig()
+    events: List[SetPieceEvent] = []
+    n = len(ball_track)
+    if n < 3:
+        return events
+
+    frame_w = ball_track.frame_size[0]
+    radius = cfg.set_piece_stationary_radius_frac * frame_w
+    kick_speed = cfg.set_piece_kick_speed_frame_widths_per_s * frame_w
+    times, xs, ys = ball_track.times, ball_track.xs, ball_track.ys
+    center_x = (geometry.x_min + geometry.x_max) / 2.0
+    center_y = (geometry.y_min + geometry.y_max) / 2.0
+
+    def _classify(x: float, y: float) -> Tuple[str, Optional[str]]:
+        corner_r = cfg.corner_radius_frac * geometry.width
+        for cx in (geometry.x_min, geometry.x_max):
+            for cy in (geometry.y_min, geometry.y_max):
+                if math.hypot(x - cx, y - cy) <= corner_r:
+                    return "corner_kick", "left" if cx == geometry.x_min else "right"
+        for goal in (geometry.left_goal, geometry.right_goal):
+            line_x = goal.x2 if goal.side == "left" else goal.x1
+            depth = abs(x - line_x)
+            toward_field = (x > line_x) if goal.side == "left" else (x < line_x)
+            if not toward_field:
+                continue
+            gy = goal.center[1]
+            lo, hi = cfg.penalty_depth_range_frac
+            if lo * geometry.width <= depth <= hi * geometry.width and abs(y - gy) <= cfg.penalty_half_height_frac * geometry.height:
+                return "penalty_kick", goal.side
+            if depth <= cfg.goal_kick_zone_depth_frac * geometry.width and abs(y - gy) <= cfg.goal_kick_zone_half_height_frac * geometry.height:
+                return "goal_kick", goal.side
+        if math.hypot(x - center_x, y - center_y) <= cfg.kickoff_center_frac * geometry.width:
+            return "kickoff", None
+        threat = cfg.free_kick_threat_frac * geometry.width
+        side = None
+        if x - geometry.x_min <= threat:
+            side = "left"
+        elif geometry.x_max - x <= threat:
+            side = "right"
+        return "free_kick", side
+
+    i = 0
+    while i < n - 1:
+        if times[i] < start_s:
+            i += 1
+            continue
+        if times[i] > end_s:
+            break
+        # Grow a stationary window anchored at sample i.
+        j = i + 1
+        anchor_x, anchor_y = float(xs[i]), float(ys[i])
+        while j < n and times[j] <= end_s:
+            if (times[j] - times[j - 1]) > ball_track.config.max_interpolation_gap_s:
+                break
+            if math.hypot(float(xs[j]) - anchor_x, float(ys[j]) - anchor_y) > radius:
+                break
+            j += 1
+        window_len = float(times[j - 1] - times[i])
+        if window_len >= cfg.set_piece_min_stationary_s and j < n:
+            t_kick = float(times[j - 1])
+            # Probe twice after the window ends: a kicked ball is still
+            # accelerating, so the later probe catches slower restarts.
+            speeds = [
+                math.hypot(*ball_track.velocity_at(t_kick + 0.3, window_s=0.5)),
+                math.hypot(*ball_track.velocity_at(t_kick + 0.7, window_s=0.5)),
+            ]
+            if max(speeds) >= kick_speed:
+                kind, side = _classify(anchor_x, anchor_y)
+                reason = f"{kind.replace('_', ' ')} detected: ball held still {window_len:.1f}s then kicked"
+                if side is not None and kind in {"corner_kick", "free_kick", "penalty_kick"}:
+                    reason += f"; threatens the {side} goal"
+                events.append(
+                    SetPieceEvent(
+                        kind=kind, t_start=float(times[i]), t_kick=t_kick,
+                        x=anchor_x, y=anchor_y, side=side, reason=reason,
+                    )
+                )
+                LOGGER.info("set piece: %s at t=%.1fs-%.1fs (%.0f, %.0f) side=%s",
+                            kind, float(times[i]), t_kick, anchor_x, anchor_y, side)
+                i = j
+                continue
+        i += 1
+    return events
+
+
+def overlay_set_piece_states(
+    segments: List[GameStateSegment],
+    set_pieces: Sequence[SetPieceEvent],
+) -> List[GameStateSegment]:
+    """Carve corner/free-kick setup states into the base state timeline.
+
+    Goal celebrations keep priority; set-piece setup windows replace whatever
+    other state covered [t_start, t_kick] so the camera planner can frame the
+    restart (ball AND threatened goal in view).
+    """
+    overlays: List[GameStateSegment] = []
+    for sp in set_pieces:
+        if sp.kind == "corner_kick" and sp.side:
+            state = STATE_CORNER_SETUP
+        elif sp.kind in {"free_kick", "penalty_kick"} and sp.side:
+            state = STATE_FREE_KICK_SETUP
+        else:
+            continue  # goal kicks/kickoffs already behave correctly
+        overlays.append(GameStateSegment(
+            start_s=sp.t_start, end_s=sp.t_kick, state=state, side=sp.side,
+            reason=sp.reason,
+        ))
+
+    result = list(segments)
+    for overlay in sorted(overlays, key=lambda s: s.start_s):
+        updated: List[GameStateSegment] = []
+        for seg in result:
+            if seg.state in GOAL_STATES or seg.end_s <= overlay.start_s or seg.start_s >= overlay.end_s:
+                updated.append(seg)
+                continue
+            if seg.start_s < overlay.start_s:
+                updated.append(GameStateSegment(seg.start_s, overlay.start_s, seg.state, seg.side, seg.reason))
+            updated.append(GameStateSegment(
+                max(seg.start_s, overlay.start_s), min(seg.end_s, overlay.end_s),
+                overlay.state, overlay.side, overlay.reason,
+            ))
+            if seg.end_s > overlay.end_s:
+                updated.append(GameStateSegment(overlay.end_s, seg.end_s, seg.state, seg.side, seg.reason))
+        result = updated
+
+    # Merge adjacent identical states created by the splitting.
+    merged: List[GameStateSegment] = []
+    for seg in sorted(result, key=lambda s: s.start_s):
+        if seg.end_s - seg.start_s <= 1e-6:
+            continue
+        if merged and merged[-1].state == seg.state and merged[-1].side == seg.side \
+                and abs(merged[-1].end_s - seg.start_s) < 1e-6:
+            merged[-1].end_s = seg.end_s
+        else:
+            merged.append(seg)
+    return merged
 
 
 def state_at(segments: Sequence[GameStateSegment], t: float) -> Optional[GameStateSegment]:
