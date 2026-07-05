@@ -25,9 +25,6 @@ export VH_SKIP_USER_MANAGEMENT="${VH_SKIP_USER_MANAGEMENT:-true}"
 export VH_BASE_TENANT_SLUG="${VH_BASE_TENANT_SLUG:-sandbox}"
 export VH_BASE_TENANT_NAME="${VH_BASE_TENANT_NAME:-Sandbox Tenant}"
 # The portals talk to the API over localhost inside this same container.
-export VH_PORTAL_API_BASE="${VH_PORTAL_API_BASE:-http://localhost:8000/v1}"
-export VH_PORTAL_TENANT="${VH_PORTAL_TENANT:-sandbox}"
-export STREAMLIT_BROWSER_GATHER_USAGE_STATS="${STREAMLIT_BROWSER_GATHER_USAGE_STATS:-false}"
 
 mkdir -p "$VH_OUTPUT_ROOT" "$VH_LOCAL_STORAGE_ROOT" /app/data
 
@@ -53,19 +50,10 @@ start python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
 # Give the API a moment to create the database before dependents start.
 sleep 3
 start python -m backend.worker
-start streamlit run app.py --server.address=0.0.0.0 --server.port=8504 --server.headless=true
-start streamlit run app_api.py --server.address=0.0.0.0 --server.port=8501 --server.headless=true
-start streamlit run app_admin_global.py --server.address=0.0.0.0 --server.port=8502 --server.headless=true
-start streamlit run app_admin_tenant.py --server.address=0.0.0.0 --server.port=8503 --server.headless=true
-start streamlit run app_review.py --server.address=0.0.0.0 --server.port=8505 --server.headless=true
 
 echo "[start-all] all services launched:"
-echo "  API:                http://localhost:8000/docs"
-echo "  Processing portal:  http://localhost:8504"
-echo "  API client portal:  http://localhost:8501"
-echo "  Global admin:       http://localhost:8502"
-echo "  Tenant admin:       http://localhost:8503"
-echo "  Review portal:      http://localhost:8505"
+echo "  Studio (web UI + API):  http://localhost:8000"
+echo "  API docs:               http://localhost:8000/docs"
 
 # If any service dies, stop the container so the failure is visible
 # (restart policies can then recover it).

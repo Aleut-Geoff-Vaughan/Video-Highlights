@@ -8,11 +8,9 @@ This repository now provides a local Python pipeline plus a web/API foundation w
 
 1. CLI pipeline: `VideoHighlights.py`
 2. Desktop UI: `VideoHighlightsGUI.py`
-3. Streamlit processing portal UI: `app.py`
-4. FastAPI backend: `backend/main.py`
-5. API operator UI: `app_api.py`
-6. Global admin portal: `app_admin_global.py`
-7. Tenant admin portal: `app_admin_tenant.py`
+3. FastAPI backend + built-in Studio web UI: `backend/main.py` + `frontend/`
+   (library & review with view toggles, upload & process, job tracking -
+   one server, one port, no separate frontend build)
 
 The planned direction is a web/cloud architecture with Dockerized workers and optional GPU acceleration.
 
@@ -150,11 +148,11 @@ Debug & training outputs:
 4. Every run writes `analysis_game_states.json` (state segments, goal events,
    field geometry, ball-track stats).
 
-### Run Processing Portal (Streamlit)
+### Run the Studio Web UI
 
 ```bash
-set VH_PORTAL_API_BASE=http://127.0.0.1:8000/v1
-python -m streamlit run app.py
+python -m uvicorn backend.main:app --port 8000
+# open http://localhost:8000
 ```
 
 For large match files, including 10GB+ recordings, use the portal's **Local File Path (10GB+)** video source. Use **Browse** or paste a path to register a file that already exists on the API/worker machine and process it in place. The portal preflights the path through the API worker and reports file size, basic media metadata when `ffprobe` is available, and clear messages for missing, zero-byte, cloud-placeholder, or still-copying files. Browser upload is intended only for smaller files.
@@ -466,9 +464,10 @@ docker run -d --name video-highlights \
 
 Then open:
 
-- Processing portal (main UI): http://localhost:8504
+- **Studio (web UI)**: http://localhost:8000 - Library & Review (toggle
+  Original / Debug / Zoom / Reel / Clips), Create & Process, and Job
+  tracking in one app served by the API itself.
 - API docs: http://localhost:8000/docs
-- API client / global admin / tenant admin: 8501 / 8502 / 8503
 
 In Docker Desktop's "Run a new container" dialog this means: map every
 listed port to the same host port, and add a volume from a Windows folder

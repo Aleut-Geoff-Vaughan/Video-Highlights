@@ -17,9 +17,6 @@ moviepy>=1.0.0
 librosa>=0.9.0
 soundfile>=0.10.0
 
-# Web Interface
-streamlit>=1.28.0
-
 # System Information (for GUI hardware display)
 psutil>=5.8.0
 

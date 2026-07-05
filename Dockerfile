@@ -18,7 +18,7 @@ RUN pip install --upgrade pip && pip install -r /app/requirements.txt
 COPY . /app
 RUN chmod +x /app/docker/start_all.sh
 
-EXPOSE 8000 8501 8502 8503 8504 8505
+EXPOSE 8000
 
 # Default: full stack in one container (API + worker + all web portals) so a
 # plain `docker run` of the published image delivers the complete product.

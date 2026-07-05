@@ -11,7 +11,9 @@ from starlette.requests import Request
 from .config import settings
 from .database import init_db, session_scope
 from .logging_utils import configure_runtime_logging
-from .routers import admin_global, admin_tenant, agent, auth, events, feedback, health, jobs, matches, training
+from pathlib import Path
+from fastapi.staticfiles import StaticFiles
+from .routers import admin_global, admin_tenant, agent, auth, events, feedback, health, jobs, matches, studio, training
 from .services.job_runner import recover_interrupted_inline_jobs
 from .tenant import ensure_seed_tenants
 from .utils import generate_id
@@ -97,6 +99,13 @@ def create_app() -> FastAPI:
     app.include_router(feedback.router, prefix="/v1")
     app.include_router(training.router, prefix="/v1")
     app.include_router(agent.router, prefix="/v1")
+    app.include_router(studio.router, prefix="/v1")
+
+    # Built-in web UI: a self-contained SPA served at "/" (no separate
+    # frontend server, no build step).
+    frontend_dir = Path(__file__).resolve().parent.parent / "frontend"
+    if frontend_dir.is_dir():
+        app.mount("/", StaticFiles(directory=str(frontend_dir), html=True), name="studio-ui")
 
     return app
 
