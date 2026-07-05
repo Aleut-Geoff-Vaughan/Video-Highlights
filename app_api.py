@@ -190,7 +190,7 @@ with tabs[2]:
 
 with tabs[3]:
     st.subheader("Create Job")
-    st.text_input("Match ID ", key="match_id")
+    st.text_input("Match ID", key="match_id_2", value=st.session_state.get("match_id", ""))
     job_config_text = st.text_area(
         "Job Config JSON",
         value='{"pre_seconds":2.0,"post_seconds":6.0,"min_clip_duration":4.0,"camera_mode":"wide","zoom_factor":1.6,"overlay":false}',
@@ -328,7 +328,7 @@ with tabs[3]:
 
 with tabs[4]:
     st.subheader("List Events")
-    st.text_input("Match ID  ", key="match_id")
+    st.text_input("Match ID", key="match_id_3", value=st.session_state.get("match_id", ""))
     col1, col2 = st.columns(2)
     with col1:
         filter_event_type = st.text_input("Event Type Filter", value="")
@@ -393,8 +393,8 @@ with tabs[4]:
 
 with tabs[5]:
     st.subheader("Submit Feedback")
-    st.text_input("Match ID   ", key="match_id")
-    st.text_input("Event ID", key="event_id")
+    st.text_input("Match ID", key="match_id_4", value=st.session_state.get("match_id", ""))
+    st.text_input("Event ID", key="event_id_2", value=st.session_state.get("event_id", ""))
     feedback_type = st.selectbox(
         "Feedback Type",
         [
@@ -458,7 +458,7 @@ with tabs[5]:
 
 with tabs[6]:
     st.subheader("Training Batch + Run")
-    st.text_input("Match ID    ", key="match_id")
+    st.text_input("Match ID", key="match_id_5", value=st.session_state.get("match_id", ""))
     if st.button("Create Feedback Batch", disabled=not st.session_state.match_id):
         r = api_request(
             "POST",
@@ -508,7 +508,7 @@ with tabs[6]:
 
 with tabs[7]:
     st.subheader("Agent Query")
-    st.text_input("Match ID     ", key="match_id")
+    st.text_input("Match ID", key="match_id_6", value=st.session_state.get("match_id", ""))
     agent_query = st.text_area("Query", value="Summarize key events and likely missing high-impact moments.")
     if st.button("Run Agent Query", disabled=not st.session_state.match_id):
         r = api_request(
@@ -522,7 +522,7 @@ with tabs[7]:
         st.json(parse_response(r))
 
     st.subheader("Agent Explain Event")
-    st.text_input("Event ID ", key="event_id")
+    st.text_input("Event ID", key="event_id_3", value=st.session_state.get("event_id", ""))
     explain_q = st.text_input("Explain Question", value="Why was this event detected?")
     if st.button("Explain Event", disabled=not st.session_state.match_id or not st.session_state.event_id):
         r = api_request(

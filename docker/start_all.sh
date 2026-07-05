@@ -53,19 +53,13 @@ start python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
 # Give the API a moment to create the database before dependents start.
 sleep 3
 start python -m backend.worker
-start streamlit run app.py --server.address=0.0.0.0 --server.port=8504 --server.headless=true
-start streamlit run app_api.py --server.address=0.0.0.0 --server.port=8501 --server.headless=true
-start streamlit run app_admin_global.py --server.address=0.0.0.0 --server.port=8502 --server.headless=true
-start streamlit run app_admin_tenant.py --server.address=0.0.0.0 --server.port=8503 --server.headless=true
-start streamlit run app_review.py --server.address=0.0.0.0 --server.port=8505 --server.headless=true
+# ONE unified portal: every page (library/review, processing, API console,
+# admin) lives inside the Studio app.
+start streamlit run app_studio.py --server.address=0.0.0.0 --server.port=8504 --server.headless=true
 
 echo "[start-all] all services launched:"
-echo "  API:                http://localhost:8000/docs"
-echo "  Processing portal:  http://localhost:8504"
-echo "  API client portal:  http://localhost:8501"
-echo "  Global admin:       http://localhost:8502"
-echo "  Tenant admin:       http://localhost:8503"
-echo "  Review portal:      http://localhost:8505"
+echo "  Studio (unified portal):  http://localhost:8504"
+echo "  API:                      http://localhost:8000/docs"
 
 # If any service dies, stop the container so the failure is visible
 # (restart policies can then recover it).

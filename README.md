@@ -466,9 +466,10 @@ docker run -d --name video-highlights \
 
 Then open:
 
-- Processing portal (main UI): http://localhost:8504
+- **Studio (unified portal)**: http://localhost:8504 - Library & Review,
+  Create & Process, API Console, and Admin all live in one app's left
+  navigation.
 - API docs: http://localhost:8000/docs
-- API client / global admin / tenant admin: 8501 / 8502 / 8503
 
 In Docker Desktop's "Run a new container" dialog this means: map every
 listed port to the same host port, and add a volume from a Windows folder

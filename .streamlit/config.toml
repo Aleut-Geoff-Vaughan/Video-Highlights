@@ -6,5 +6,13 @@ maxUploadSize = 50000
 maxMessageSize = 50000
 
 [browser]
-# Automatically open browser (set to false in remote environments)
 gatherUsageStats = false
+
+[theme]
+# Studio dark theme
+base = "dark"
+primaryColor = "#ff4b4b"
+backgroundColor = "#0f1115"
+secondaryBackgroundColor = "#181b22"
+textColor = "#e8eaed"
+font = "sans serif"
