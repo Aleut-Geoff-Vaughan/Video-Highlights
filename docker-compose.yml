@@ -77,6 +77,22 @@ services:
     volumes:
       - ./:/app
 
+  review-portal:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vh-review-portal
+    command: streamlit run app_review.py --server.address=0.0.0.0 --server.port=8505
+    environment:
+      STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
+      VH_OUTPUT_ROOT: ./outputs
+    ports:
+      - "8505:8505"
+    depends_on:
+      - api
+    volumes:
+      - ./:/app
+
   admin-global:
     build:
       context: .

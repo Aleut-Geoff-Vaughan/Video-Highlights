@@ -83,8 +83,13 @@ from backend.services.game_tracking import (
     summarize_states,
 )
 from backend.services.card_detection import detect_card_events, stopped_play_windows
+from backend.services.broadcast import (
+    build_broadcast_reel,
+    compute_audio_envelope,
+    refine_intervals,
+)
 from backend.services.camera_planner import CameraPlan, plan_camera, slice_plan
-from backend.services.camera_render import render_camera_plan_video
+from backend.services.camera_render import make_scorebug_renderer, render_camera_plan_video
 
 LOGGER = logging.getLogger("videohighlights")
 
@@ -1018,25 +1023,36 @@ def detect_highlights_from_speed(times: np.ndarray, speed: np.ndarray, pre: floa
     return merged
 
 
-def detect_audio_peaks(video_path: str, pre: float, post: float, k: float = 2.0) -> List[Tuple[float, float]]:
+def detect_audio_peaks(
+    video_path: str,
+    pre: float,
+    post: float,
+    k: float = 2.0,
+    envelope: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+) -> List[Tuple[float, float]]:
     try:
-        try:
-            import librosa  # Lazy: audio analysis is optional at runtime
-        except ImportError:
-            print(
-                "[warn] librosa is not installed - audio peak detection disabled. "
-                "Install with: pip install librosa soundfile"
-            )
-            return []
+        if envelope is not None:
+            # Reuse the already-decoded crowd-noise envelope: decoding an
+            # hour of audio twice costs real time and memory.
+            times, rms = envelope
+        else:
+            try:
+                import librosa  # Lazy: audio analysis is optional at runtime
+            except ImportError:
+                print(
+                    "[warn] librosa is not installed - audio peak detection disabled. "
+                    "Install with: pip install librosa soundfile"
+                )
+                return []
 
-        # Load audio at native sampling rate
-        y, sr = librosa.load(video_path, sr=None, mono=True)
-        # Frame over ~100 ms windows
-        hop = int(0.05 * sr)
-        win = int(0.10 * sr)
-        rms = librosa.feature.rms(y=y, frame_length=win, hop_length=hop, center=True).flatten()
-        # Map frames to times
-        times = librosa.frames_to_time(np.arange(len(rms)), sr=sr, hop_length=hop, n_fft=win)
+            # Load audio at native sampling rate
+            y, sr = librosa.load(video_path, sr=None, mono=True)
+            # Frame over ~100 ms windows
+            hop = int(0.05 * sr)
+            win = int(0.10 * sr)
+            rms = librosa.feature.rms(y=y, frame_length=win, hop_length=hop, center=True).flatten()
+            # Map frames to times
+            times = librosa.frames_to_time(np.arange(len(rms)), sr=sr, hop_length=hop, n_fft=win)
         thr = robust_threshold(rms, k=k)
         peaks = np.where(rms >= thr)[0]
         LOGGER.debug(f"Audio threshold: {thr:.4f} (k={k}), found {len(peaks)} audio peaks")
@@ -1453,6 +1469,7 @@ def write_follow_ball_subclips(
     camera_plan: CameraPlan,
     field_geometry: FieldGeometry,
     max_workers: Optional[int] = None,
+    scorebug_fn=None,
 ) -> List[str]:
     """Render highlight clips from the game-centric camera plan.
 
@@ -1479,6 +1496,7 @@ def write_follow_ball_subclips(
                 output_path=out_path,
                 plan=sub_plan,
                 include_audio=True,
+                scorebug_fn=scorebug_fn,
                 geometry=field_geometry,
             )
         except Exception as ex:
@@ -1713,6 +1731,10 @@ def process_video_highlights(
     goal_box_left: Optional[Dict[str, float]] = None,
     goal_box_right: Optional[Dict[str, float]] = None,
     detect_cards: bool = True,
+    broadcast_reel: bool = True,
+    scorebug: bool = True,
+    team_left: str = "HOME",
+    team_right: str = "AWAY",
 ) -> bool:
     """Public pipeline entry point used by the CLI, GUI, and API worker.
 
@@ -1757,6 +1779,10 @@ def process_video_highlights(
             goal_box_left=goal_box_left,
             goal_box_right=goal_box_right,
             detect_cards=detect_cards,
+            broadcast_reel=broadcast_reel,
+            scorebug=scorebug,
+            team_left=team_left,
+            team_right=team_right,
         )
     finally:
         teardown_run_logging(run_log_handler)
@@ -1828,6 +1854,10 @@ def _process_video_highlights_impl(
     goal_box_left: Optional[Dict[str, float]] = None,
     goal_box_right: Optional[Dict[str, float]] = None,
     detect_cards: bool = True,
+    broadcast_reel: bool = True,
+    scorebug: bool = True,
+    team_left: str = "HOME",
+    team_right: str = "AWAY",
 ) -> bool:
     """
     Core video highlights processing function.
@@ -2033,10 +2063,15 @@ def _process_video_highlights_impl(
         )
 
         audio_intervals = []
+        audio_envelope = None
         if not no_audio:
             print("[3/5] Detecting audio peaks...")
             emit_progress(progress_callback, "audio", 0.76, "Detecting audio peaks")
-            audio_intervals = detect_audio_peaks(processing_video, pre=pre_seconds, post=post_seconds, k=audio_sensitivity)
+            audio_envelope = compute_audio_envelope(processing_video)
+            audio_intervals = detect_audio_peaks(
+                processing_video, pre=pre_seconds, post=post_seconds,
+                k=audio_sensitivity, envelope=audio_envelope,
+            )
         else:
             emit_progress(progress_callback, "audio", 0.78, "Audio analysis skipped by configuration")
 
@@ -2166,6 +2201,20 @@ def _process_video_highlights_impl(
                 "intervals after adding %d goal/%d set-piece/%d card interval(s): %d",
                 len(goal_intervals), len(threat_set_pieces), len(card_events), len(intervals),
             )
+
+        # Broadcast boundary refinement: goals start where the move began
+        # (dead ball / change of attacking direction) and every clip ends
+        # when the crowd noise has decayed, not at a fixed offset.
+        boundary_events = (
+            [{"t": g.t, "event_type": "goal", "side": g.side} for g in goal_events]
+            + [{"t": c.t, "event_type": c.kind} for c in card_events]
+            + [{"t": sp.t_kick, "event_type": sp.kind, "side": sp.side} for sp in threat_set_pieces]
+        )
+        intervals = refine_intervals(
+            intervals, boundary_events, ball_track, game_segments,
+            audio_envelope, analysis_end_s,
+        )
+        LOGGER.debug("intervals after broadcast boundary refinement: %d", len(intervals))
 
         # Enforce minimum clip length and clamp to video duration
         clamped_intervals = []
@@ -2381,6 +2430,14 @@ def _process_video_highlights_impl(
             {"analysis_manifest_path": manifest_path, "analysis_table_csv_path": csv_path, "bookmark_count": len(bookmarks)},
         )
 
+        scorebug_fn = None
+        if scorebug and camera_mode == "follow_ball":
+            scorebug_fn = make_scorebug_renderer(
+                [{"t": g.t, "side": g.side} for g in goal_events],
+                team_left=team_left,
+                team_right=team_right,
+            )
+
         # --- Game-centric camera plan (center of the game + why) ---
         camera_plan: Optional[CameraPlan] = None
         need_camera_plan = camera_mode == "follow_ball" or debug_video or dump_training_data
@@ -2475,6 +2532,7 @@ def _process_video_highlights_impl(
                         plan=camera_plan,
                         include_audio=True,
                         debug_wide=False,
+                        scorebug_fn=scorebug_fn,
                         geometry=field_geometry,
                         progress_callback=_full_ball_progress,
                     )
@@ -2540,6 +2598,7 @@ def _process_video_highlights_impl(
                 camera_plan,
                 field_geometry,
                 max_workers=threads,
+                scorebug_fn=scorebug_fn,
             )
         else:
             clip_paths = write_follow_cam_subclips(
@@ -2554,10 +2613,40 @@ def _process_video_highlights_impl(
                 track_time_offset_seconds=trim_offset,
             )
 
+        # Broadcast reel: cold-open teaser, chronological clips with
+        # crossfades and normalized audio, slow-motion replays after goals.
+        reel_path: Optional[str] = None
+        if clip_paths and broadcast_reel:
+            try:
+                existing = {os.path.basename(p) for p in clip_paths}
+                clip_specs: List[Dict[str, object]] = []
+                for k, (s, e) in enumerate(original_intervals, start=1):
+                    name = f"highlight_{k:02d}.mp4"
+                    if name not in existing:
+                        continue
+                    bm = bookmarks[k - 1] if k - 1 < len(bookmarks) else {}
+                    detected = str(bm.get("label", "")).endswith("_detected")
+                    clip_specs.append({
+                        "path": os.path.join(output_dir, name),
+                        "start_s": s,
+                        "end_s": e,
+                        "event_type": bm.get("event_type") if detected else None,
+                        "occurred_at_s": bm.get("occurred_at_s"),
+                        "confidence": bm.get("confidence"),
+                    })
+                reel_path = build_broadcast_reel(
+                    clip_specs, os.path.join(output_dir, "highlights_reel.mp4")
+                )
+                if reel_path:
+                    print(f"[reel] Broadcast reel: {reel_path}")
+            except Exception as reel_exc:
+                print(f"[warn] Broadcast reel failed ({reel_exc}); falling back to plain montage")
+                reel_path = None
+
         # Montage (best-effort: clips are the deliverable, so a montage
         # failure - e.g. moviepy missing on this host - must not fail a run
         # whose clips all rendered successfully).
-        if clip_paths:
+        if clip_paths and not reel_path:
             try:
                 VideoFileClip, concatenate_videoclips = _import_moviepy()
                 clips = []
@@ -2619,6 +2708,11 @@ def main():
     ap.add_argument("--goal-box-left", type=str, default=None, help="Manual left goal box as x1,y1,x2,y2 (normalized 0-1 or pixels); overrides auto estimate")
     ap.add_argument("--goal-box-right", type=str, default=None, help="Manual right goal box as x1,y1,x2,y2 (normalized 0-1 or pixels); overrides auto estimate")
     ap.add_argument("--no-card-detection", action="store_true", help="Disable yellow/red card flagging (enabled by default)")
+    ap.add_argument("--no-broadcast-reel", action="store_true", help="Build the plain montage instead of the broadcast reel (cold open, crossfades, goal replays)")
+    ap.add_argument("--team-left", type=str, default="HOME", help="Name of the team defending the LEFT goal (scorebug)")
+    ap.add_argument("--team-right", type=str, default="AWAY", help="Name of the team defending the RIGHT goal (scorebug)")
+    ap.add_argument("--no-scorebug", action="store_true", help="Disable the score + clock overlay on follow_ball renders")
+    ap.add_argument("--fast", action="store_true", help="~2x faster tracking: analyze every 2nd frame at reduced inference size (slightly lower detection fidelity)")
     args = ap.parse_args()
 
     def _parse_goal_box(raw: Optional[str], flag: str) -> Optional[Dict[str, float]]:
@@ -2748,6 +2842,12 @@ def main():
         goal_box_left=goal_box_left,
         goal_box_right=goal_box_right,
         detect_cards=not args.no_card_detection,
+        broadcast_reel=not args.no_broadcast_reel,
+        scorebug=not args.no_scorebug,
+        team_left=args.team_left,
+        team_right=args.team_right,
+        vid_stride=2 if args.fast else 1,
+        inference_imgsz=736 if args.fast else 960,
     )
 
     if not success:

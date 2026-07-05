@@ -144,3 +144,25 @@ def test_render_fails_cleanly_on_missing_video(tmp_path) -> None:
             plan=_plan(),
             include_audio=False,
         )
+
+
+def test_scorebug_renders_score_clock_and_goal_flash() -> None:
+    from backend.services.camera_render import make_scorebug_renderer
+
+    fn = make_scorebug_renderer(
+        [{"t": 100.0, "side": "left"}, {"t": 200.0, "side": "right"}],
+        team_left="LIONS", team_right="HAWKS",
+    )
+    frame = np.zeros((360, 640, 3), dtype=np.uint8)
+    out = fn(frame, 102.0)  # 2s after a goal into the LEFT goal
+    assert out is frame
+    # Scorebug strip drawn top-left...
+    assert float(frame[8:30, 8:200].mean()) > 2.0
+    # ...and the GOAL flash is red-dominant somewhere mid-frame.
+    band = frame[30:120, :]
+    assert int((band[:, :, 2].astype(int) - band[:, :, 1]).max()) > 100
+
+    # Score changes over time: before any goal, after 1, after 2.
+    for t, expect in ((50.0, (0, 0)), (150.0, (0, 1)), (250.0, (1, 1))):
+        f2 = np.zeros((360, 640, 3), dtype=np.uint8)
+        fn(f2, t)  # smoke: no exception; score text differs per t

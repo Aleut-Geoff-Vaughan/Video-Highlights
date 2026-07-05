@@ -41,6 +41,59 @@ from .game_tracking import FieldGeometry, GOAL_STATES, RESTART_STATES
 LOGGER = logging.getLogger("videohighlights.camera_render")
 
 FrameDecorator = Callable[[np.ndarray, CameraDecision], np.ndarray]
+ScorebugFn = Callable[[np.ndarray, float], np.ndarray]
+
+
+def make_scorebug_renderer(
+    goal_events: Sequence[Dict[str, object]],
+    team_left: str = "HOME",
+    team_right: str = "AWAY",
+    flash_s: float = 4.0,
+) -> ScorebugFn:
+    """Broadcast scorebug: running score + match clock + GOAL flash.
+
+    ``goal_events``: dicts with ``t`` and ``side`` (which goal the ball
+    entered) in the same timebase as render decisions. A goal INTO the left
+    goal scores for the right-defending team and vice versa.
+    """
+    cv2 = _import_cv2()
+    goals = sorted(
+        (float(g.get("t", 0.0)), str(g.get("side") or "")) for g in goal_events
+    )
+    tl, tr = (team_left or "HOME")[:10].upper(), (team_right or "AWAY")[:10].upper()
+
+    def _draw(frame: np.ndarray, t: float) -> np.ndarray:
+        score_l = sum(1 for gt, side in goals if gt <= t and side == "right")
+        score_r = sum(1 for gt, side in goals if gt <= t and side == "left")
+        minutes = int(t // 60)
+        clock = f"{minutes:02d}:{int(t % 60):02d}"
+        text = f"{tl} {score_l} - {score_r} {tr}   {clock}"
+
+        h, w = frame.shape[:2]
+        scale = max(0.45, w / 2600.0)
+        thick = max(1, w // 900)
+        (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, thick)
+        pad = max(6, th // 2)
+        x0, y0 = pad, pad
+        x1, y1 = x0 + tw + 2 * pad, y0 + th + 2 * pad
+        overlay = frame[y0:y1, x0:x1].copy()
+        overlay[:] = (20, 20, 20)
+        frame[y0:y1, x0:x1] = cv2.addWeighted(overlay, 0.72, frame[y0:y1, x0:x1], 0.28, 0)
+        cv2.putText(frame, text, (x0 + pad, y1 - pad), cv2.FONT_HERSHEY_SIMPLEX,
+                    scale, (255, 255, 255), thick)
+
+        flash = next((gt for gt, _ in goals if 0.0 <= t - gt <= flash_s), None)
+        if flash is not None:
+            gtext = f"GOAL!  {int(flash // 60)}'"
+            (gw, gh), _ = cv2.getTextSize(gtext, cv2.FONT_HERSHEY_SIMPLEX, scale * 1.6, thick + 1)
+            gx, gy = (w - gw) // 2, y1 + gh + pad * 2
+            cv2.putText(frame, gtext, (gx + 2, gy + 2), cv2.FONT_HERSHEY_SIMPLEX,
+                        scale * 1.6, (0, 0, 0), thick + 2)
+            cv2.putText(frame, gtext, (gx, gy), cv2.FONT_HERSHEY_SIMPLEX,
+                        scale * 1.6, (60, 60, 240), thick + 1)
+        return frame
+
+    return _draw
 
 _STATE_COLORS: Dict[str, Tuple[int, int, int]] = {
     "in_play": (80, 200, 80),
@@ -204,6 +257,7 @@ def render_camera_plan_video(
     include_audio: bool = True,
     debug_wide: bool = False,
     overlay_banner: bool = False,
+    scorebug_fn: Optional[ScorebugFn] = None,
     geometry: Optional[FieldGeometry] = None,
     max_debug_width: int = 1280,
     progress_callback: Optional[RenderProgressCallback] = None,
@@ -250,6 +304,8 @@ def render_camera_plan_video(
                                              decision.zoom, output_size=(out_w, out_h))
                 if overlay_banner:
                     annotate_zoomed_banner(frame, decision)
+                if scorebug_fn is not None:
+                    frame = scorebug_fn(frame, decision.t)
             yield frame
 
     def _open_capture():
