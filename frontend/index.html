@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Video Highlights Studio</title>
+<style>
+:root{--bg:#0f1115;--panel:#171a21;--panel2:#1e222b;--line:#2a2f3a;--text:#e8eaed;--dim:#9aa0a6;--accent:#ff4b4b;--ok:#3ddc84;--warn:#fbbc04}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font:14px/1.5 -apple-system,'Segoe UI',Roboto,sans-serif;display:flex;min-height:100vh}
+a{color:#8ab4f8;text-decoration:none}
+nav{width:230px;background:var(--panel);border-right:1px solid var(--line);padding:18px 12px;position:fixed;top:0;bottom:0}
+nav .logo{font-size:17px;font-weight:700;padding:4px 10px 14px;border-bottom:1px solid var(--line);margin-bottom:12px}
+nav .logo span{color:var(--accent)}
+nav .group{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.08em;padding:12px 10px 4px}
+nav button{display:flex;gap:10px;width:100%;text-align:left;background:none;border:0;color:var(--text);padding:9px 10px;border-radius:8px;cursor:pointer;font-size:14px}
+nav button:hover{background:var(--panel2)}
+nav button.active{background:#2b2016;color:#ffb86b}
+main{margin-left:230px;flex:1;padding:22px 26px;max-width:1500px}
+h1{font-size:20px;margin-bottom:4px} .sub{color:var(--dim);margin-bottom:18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;cursor:pointer;transition:border-color .15s}
+.card:hover{border-color:#4a5160}
+.card h3{font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.card .meta{color:var(--dim);font-size:12px;margin:4px 0 10px}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{background:var(--panel2);border:1px solid var(--line);border-radius:20px;padding:2px 10px;font-size:12px;color:var(--dim)}
+.chip.goal{color:var(--ok);border-color:#254d38}.chip.card-y{color:var(--warn)}.chip.card-r{color:var(--accent)}
+.viewbar{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}
+.viewbar button{background:var(--panel2);border:1px solid var(--line);color:var(--text);padding:7px 16px;border-radius:20px;cursor:pointer;font-size:13px}
+.viewbar button.active{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+.player{display:grid;grid-template-columns:minmax(0,2.2fr) minmax(300px,1fr);gap:18px}
+video{width:100%;border-radius:12px;background:#000;border:1px solid var(--line)}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:14px}
+.panel h3{font-size:13px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th{color:var(--dim);text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);font-weight:500}
+td{padding:6px 8px;border-bottom:1px solid #20242d}
+tr.clickable{cursor:pointer} tr.clickable:hover{background:var(--panel2)}
+.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px}
+.metric{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 14px}
+.metric .v{font-size:20px;font-weight:700}.metric .l{color:var(--dim);font-size:12px}
+form{max-width:680px}
+label{display:block;color:var(--dim);font-size:12.5px;margin:14px 0 4px}
+input[type=text],input[type=number],input[type=date],select{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:9px 12px;font-size:14px}
+input[type=file]{color:var(--dim)}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
+.checks{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
+.checks label{display:flex;gap:8px;align-items:center;margin:0;color:var(--text);font-size:13.5px}
+.btn{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:11px 22px;font-size:14px;font-weight:600;cursor:pointer;margin-top:18px}
+.btn:disabled{opacity:.5;cursor:default}
+.btn2{background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:8px;padding:7px 14px;cursor:pointer;font-size:13px}
+.bar{height:8px;background:var(--panel2);border-radius:6px;overflow:hidden}
+.bar i{display:block;height:100%;background:var(--ok);transition:width .4s}
+.status{padding:2px 10px;border-radius:20px;font-size:12px;font-weight:600}
+.status.completed{background:#173626;color:var(--ok)}.status.failed{background:#3a1d1d;color:var(--accent)}
+.status.running,.status.claimed{background:#332a14;color:var(--warn)}.status.queued{background:var(--panel2);color:var(--dim)}
+pre{background:#0b0d11;border:1px solid var(--line);border-radius:10px;padding:12px;font-size:12px;overflow:auto;max-height:340px;white-space:pre-wrap}
+.crops{display:grid;grid-template-columns:repeat(auto-fill,minmax(90px,1fr));gap:8px}
+.crops img{width:100%;border-radius:8px;border:1px solid var(--line)}
+.note{color:var(--dim);font-size:12.5px;margin-top:8px}
+.empty{color:var(--dim);padding:40px;text-align:center;border:1px dashed var(--line);border-radius:12px}
+</style>
+</head>
+<body>
+<nav>
+  <div class="logo">🎥 Video Highlights <span>Studio</span></div>
+  <div class="group">Studio</div>
+  <button data-page="library" onclick="go('library')">🎬 Library</button>
+  <button data-page="create" onclick="go('create')">⬆️ Create</button>
+  <button data-page="jobs" onclick="go('jobs')">⚙️ Jobs</button>
+  <div class="group">Operations</div>
+  <button onclick="window.open('/docs','_blank')">🔌 API Docs</button>
+</nav>
+<main id="main"></main>
+<script>
+const API='/v1', TENANT='sandbox';
+const H={'X-Tenant-Id':TENANT};
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const fmt=t=>{t=Math.max(0,+t||0);return `${String(Math.floor(t/60)).padStart(2,'0')}:${String(Math.floor(t%60)).padStart(2,'0')}`};
+async function j(url,opts={}){const r=await fetch(url,{...opts,headers:{...H,...(opts.headers||{})}});if(!r.ok)throw new Error(`${r.status} ${await r.text()}`);return r.json()}
+function go(page,arg){location.hash=arg?`${page}/${arg}`:page}
+window.onhashchange=render;
+function nav(page){document.querySelectorAll('nav button[data-page]').forEach(b=>b.classList.toggle('active',b.dataset.page===page))}
+
+async function render(){
+  const [page,arg]=(location.hash.slice(1)||'library').split('/');
+  nav(page);
+  if(page==='library'&&arg)return renderRun(arg);
+  if(page==='library')return renderLibrary();
+  if(page==='create')return renderCreate();
+  if(page==='jobs')return renderJobs();
+}
+
+async function renderLibrary(){
+  $('#main').innerHTML='<h1>Library</h1><div class="sub">Every processing run - click to review</div><div class="grid" id="g"><div class="empty">Loading…</div></div>';
+  try{
+    const {runs}=await j(`${API}/studio/runs`);
+    $('#g').innerHTML=runs.length?runs.map(r=>{
+      const s=r.stats||{};
+      return `<div class="card" onclick="go('library','${esc(r.run_id)}')">
+        <h3>${esc(r.run_id)}</h3>
+        <div class="meta">${esc((r.generated_at||'').slice(0,16).replace('T',' '))}</div>
+        <div class="chips">
+          <span class="chip goal">⚽ ${(r.goal_events||[]).length} goals</span>
+          <span class="chip">${s.bookmark_count??0} bookmarks</span>
+          <span class="chip">${(r.videos?.clips||[]).length} clips</span>
+          ${(r.card_events||[]).map(c=>`<span class="chip ${c.kind==='red_card'?'card-r':'card-y'}">${c.kind==='red_card'?'🟥':'🟨'} ${fmt(c.t)}</span>`).join('')}
+        </div></div>`;
+    }).join(''):'<div class="empty">No runs yet - process a match from <b>Create</b>.</div>';
+  }catch(e){$('#g').innerHTML=`<div class="empty">${esc(e.message)}</div>`}
+}
+
+let RUN=null;
+async function renderRun(id){
+  const r=RUN=await j(`${API}/studio/runs/${id}`);
+  const v=r.videos||{};
+  const views=[];
+  if(v.debug)views.push(['Debug','debug',v.debug]);
+  if(v.zoom)views.push(['Zoom','zoom',v.zoom]);
+  if(v.reel)views.push(['Broadcast reel','reel',v.reel]);
+  if(v.montage)views.push(['Montage','montage',v.montage]);
+  if(v.original)views.push(['Original (window)','original',v.original]);
+  (v.clips||[]).forEach((c,i)=>views.push([`Clip ${i+1}`,`clip${i}`,c]));
+  const first=v.reel?'reel':(views[0]?.[1]||'');
+  $('#main').innerHTML=`
+    <h1>${esc(id)}</h1><div class="sub"><a href="#library">← Library</a> &nbsp; ${esc(r.video_path||'')}</div>
+    <div class="viewbar" id="vb">${views.map(([label,key])=>`<button data-v="${key}" onclick="setView('${key}')">${label}</button>`).join('')}</div>
+    <div class="player">
+      <div>
+        <video id="vid" controls preload="metadata"></video>
+        <div class="panel" style="margin-top:14px"><h3>Bookmarks</h3><table><thead><tr><th>at</th><th>type</th><th>conf</th><th>state</th><th>sources</th></tr></thead>
+        <tbody>${(r.bookmarks||[]).map(b=>`<tr class="clickable" onclick="seek(${+b.occurred_at_s||0})"><td>${fmt(b.occurred_at_s)}</td><td>${esc(b.event_type)}${String(b.label||'').endsWith('_detected')?' ✓':''}</td><td>${(+b.confidence||0).toFixed(2)}</td><td>${esc(b.game_state||'')}</td><td>${esc((b.sources||[]).join(','))}</td></tr>`).join('')||'<tr><td colspan=5>none</td></tr>'}</tbody></table>
+        <div class="note">Clicking a bookmark seeks the Original/Zoom/Debug views (clip/reel timebases differ).</div></div>
+      </div>
+      <div>
+        <div class="metrics">
+          <div class="metric"><div class="v">${(r.goal_events||[]).length}</div><div class="l">Goals</div></div>
+          <div class="metric"><div class="v">${(r.card_events||[]).length}</div><div class="l">Cards</div></div>
+          <div class="metric"><div class="v">${(r.stats?.bookmark_count)??0}</div><div class="l">Bookmarks</div></div>
+        </div>
+        ${panelList('Goals',(r.goal_events||[]).map(g=>`${fmt(g.t)} - ${esc(g.side)} goal (${(+g.confidence).toFixed(2)})<br><small style="color:var(--dim)">${esc(g.reason)}</small>`))}
+        ${panelList('Set pieces',(r.set_piece_events||[]).map(s=>`${fmt(s.t_kick)} - ${esc(s.kind)}${s.side?' ('+esc(s.side)+')':''}`))}
+        ${panelList('Cards',(r.card_events||[]).map(c=>`${fmt(c.t)} - ${esc(c.kind)} (${(+c.confidence).toFixed(2)})`))}
+        <div class="panel"><h3>Game states (s)</h3><table><tbody>${Object.entries(r.state_summary_s||{}).map(([k,val])=>`<tr><td>${esc(k)}</td><td>${val}</td></tr>`).join('')}</tbody></table></div>
+        ${(r.card_crops||[]).length?`<div class="panel"><h3>Card review crops</h3><div class="crops">${r.card_crops.map(c=>`<img src="${API}/studio/runs/${esc(id)}/file/${esc(c)}" title="${esc(c)}">`).join('')}</div></div>`:''}
+      </div>
+    </div>`;
+  window._views=Object.fromEntries(views.map(([_,key,file])=>[key,file]));
+  if(first)setView(first);
+}
+function panelList(title,items){return items.length?`<div class="panel"><h3>${title}</h3>${items.map(i=>`<div style="margin-bottom:8px">${i}</div>`).join('')}</div>`:''}
+function setView(key){
+  document.querySelectorAll('#vb button').forEach(b=>b.classList.toggle('active',b.dataset.v===key));
+  const id=location.hash.split('/')[1];
+  $('#vid').src=`${API}/studio/runs/${id}/file/${window._views[key]}`;
+}
+function seek(t){const vid=$('#vid');vid.currentTime=t;vid.play()}
+
+function renderCreate(){
+  $('#main').innerHTML=`
+  <h1>Create</h1><div class="sub">Upload a match recording and start processing</div>
+  <form onsubmit="return createRun(event)">
+    <div class="row">
+      <div><label>Match name</label><input type="text" id="c_name" value="Match" required></div>
+      <div><label>Date</label><input type="date" id="c_date"></div>
+    </div>
+    <div class="row">
+      <div><label>Team defending LEFT goal</label><input type="text" id="c_left" value="HOME"></div>
+      <div><label>Team defending RIGHT goal</label><input type="text" id="c_right" value="AWAY"></div>
+    </div>
+    <label>Match video</label><input type="file" id="c_file" accept="video/*" required>
+    <div class="row3">
+      <div><label>Camera</label><select id="c_cam"><option value="follow_ball" selected>Game camera (follow ball)</option><option value="follow_action">Follow player + action</option><option value="follow_player">Follow player</option><option value="wide">Wide (no crop)</option></select></div>
+      <div><label>Zoom</label><input type="number" id="c_zoom" value="1.8" step="0.1" min="1" max="3"></div>
+      <div><label>Speed</label><select id="c_speed"><option value="quality" selected>Best quality</option><option value="fast">Fast (~2x)</option></select></div>
+    </div>
+    <div class="checks">
+      <label><input type="checkbox" id="c_full" checked> Full game-camera movie</label>
+      <label><input type="checkbox" id="c_reel" checked> Broadcast reel</label>
+      <label><input type="checkbox" id="c_cards" checked> Card detection</label>
+      <label><input type="checkbox" id="c_debug" checked> Debug video (camera decisions)</label>
+      <label><input type="checkbox" id="c_bug" checked> Scorebug overlay</label>
+      <label><input type="checkbox" id="c_train"> Training data dump</label>
+    </div>
+    <button class="btn" id="c_go">Upload &amp; Process</button>
+    <div id="c_prog" style="margin-top:14px"></div>
+  </form>`;
+}
+async function createRun(ev){
+  ev.preventDefault();
+  const btn=$('#c_go');btn.disabled=true;
+  const prog=$('#c_prog');
+  try{
+    prog.innerHTML='Creating match…';
+    const file=$('#c_file').files[0];
+    const m=await j(`${API}/matches`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:$('#c_name').value,home_team_name:$('#c_left').value,away_team_name:$('#c_right').value,match_date:$('#c_date').value||null,source_video_path:file.name,metadata:{}})});
+    prog.innerHTML='Uploading… <div class="bar"><i id="upbar" style="width:0"></i></div>';
+    await new Promise((res,rej)=>{
+      const xhr=new XMLHttpRequest();
+      xhr.open('POST',`${API}/matches/${m.match_id}/assets/upload`);
+      xhr.setRequestHeader('X-Tenant-Id',TENANT);
+      xhr.upload.onprogress=e=>{if(e.lengthComputable)$('#upbar').style.width=(100*e.loaded/e.total)+'%'};
+      xhr.onload=()=>xhr.status<300?res():rej(new Error(xhr.responseText));
+      xhr.onerror=()=>rej(new Error('upload failed'));
+      const fd=new FormData();fd.append('file',file);xhr.send(fd);
+    });
+    prog.innerHTML='Starting job…';
+    const config={camera_mode:$('#c_cam').value,zoom_factor:+$('#c_zoom').value,
+      render_full_follow_cam:$('#c_full').checked,broadcast_reel:$('#c_reel').checked,
+      detect_cards:$('#c_cards').checked,debug_video:$('#c_debug').checked,
+      scorebug:$('#c_bug').checked,dump_training_data:$('#c_train').checked,
+      team_left:$('#c_left').value,team_right:$('#c_right').value,
+      vid_stride:$('#c_speed').value==='fast'?2:1,
+      inference_imgsz:$('#c_speed').value==='fast'?736:960};
+    const job=await j(`${API}/matches/${m.match_id}/jobs`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({config})});
+    prog.innerHTML=`✅ Job <b>${esc(job.job_id)}</b> queued. <a href="#jobs">Track progress →</a>`;
+  }catch(e){prog.innerHTML=`❌ ${esc(e.message)}`}
+  btn.disabled=false;return false;
+}
+
+let jobsTimer=null;
+async function renderJobs(){
+  clearInterval(jobsTimer);
+  $('#main').innerHTML='<h1>Jobs</h1><div class="sub">Processing queue - auto-refreshes while running</div><div id="jl">Loading…</div><div id="jlog"></div>';
+  async function load(){
+    try{
+      const ms=await j(`${API}/matches?limit=25`);
+      const rows=[];
+      for(const m of (ms.items||ms.matches||[])){
+        const js=await j(`${API}/matches/${m.match_id}/jobs`);
+        for(const job of (js.items||js.jobs||[]))rows.push({match:m.name,...job});
+      }
+      rows.sort((a,b)=>String(b.created_at||'').localeCompare(String(a.created_at||'')));
+      const active=rows.some(r=>['queued','claimed','running'].includes(r.status));
+      $('#jl').innerHTML=rows.length?`<table><thead><tr><th>match</th><th>job</th><th>status</th><th>stage</th><th style="width:220px">progress</th><th></th></tr></thead><tbody>${rows.map(r=>`
+        <tr><td>${esc(r.match)}</td><td style="font-family:monospace;font-size:11px">${esc(r.job_id)}</td>
+        <td><span class="status ${esc(r.status)}">${esc(r.status)}</span></td><td>${esc(r.stage||'')}</td>
+        <td><div class="bar"><i style="width:${Math.round(100*(+r.progress||0))}%"></i></div></td>
+        <td>${r.status==='completed'?`<button class="btn2" onclick="go('library','${esc(r.job_id)}')">Review</button>`:''}
+            <button class="btn2" onclick="showLogs('${esc(r.job_id)}')">Logs</button></td></tr>`).join('')}</tbody></table>`
+        :'<div class="empty">No jobs yet.</div>';
+      if(!active)clearInterval(jobsTimer);
+    }catch(e){$('#jl').innerHTML=`<div class="empty">${esc(e.message)}</div>`;clearInterval(jobsTimer)}
+  }
+  await load();
+  jobsTimer=setInterval(load,5000);
+}
+async function showLogs(id){
+  const data=await j(`${API}/jobs/${id}/logs?limit=200`).catch(e=>({error:e.message}));
+  const lines=(data.items||data.logs||[]).map(l=>`${l.created_at||''} [${l.level||''}] ${l.stage||''}: ${l.message||''}`).join('\n');
+  $('#jlog').innerHTML=`<div class="panel" style="margin-top:16px"><h3>Logs - ${esc(id)}</h3><pre>${esc(lines||JSON.stringify(data,null,2))}</pre></div>`;
+}
+render();
+</script>
+</body>
+</html>
