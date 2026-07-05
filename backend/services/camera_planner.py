@@ -80,6 +80,11 @@ class CameraPlannerConfig:
     # Margin (fraction of frame) kept around the ball/goal pair when zooming
     # to fit both.
     both_in_frame_margin_frac: float = 0.12
+    # Operator deadband: within one state, aim changes smaller than this
+    # (fraction of frame width / absolute zoom) are ignored - a human
+    # operator holds steady instead of chasing millimeters.
+    deadband_frac: float = 0.015
+    zoom_deadband: float = 0.05
     # Zoom levels relative to the configured base zoom.
     lost_zoom_scale: float = 0.8
     restart_zoom_cap: float = 1.35
@@ -319,6 +324,10 @@ def plan_camera(
     # during a goal threat). Enforced after smoothing so the offline filter
     # can never ease them out of frame.
     keep_points: List[List[Tuple[float, float]]] = []
+    deadband_px = cfg.deadband_frac * frame_w
+    prev_key: Optional[Tuple[str, str]] = None
+    prev_target: Optional[Tuple[float, float]] = None
+    prev_zoom: Optional[float] = None
 
     for index in range(frame_count):
         t = start_seconds + index * dt
@@ -463,6 +472,18 @@ def plan_camera(
                     confidence = 0.1
                     reason = "no ball and no players visible - centering frame"
                 target_zoom = lost_zoom
+
+        # Deadband: hold the previous aim for sub-threshold changes within
+        # the same state/focus so the camera rests instead of micro-hunting.
+        key = (state, focus)
+        if prev_key == key and prev_target is not None:
+            if math.hypot(target[0] - prev_target[0], target[1] - prev_target[1]) < deadband_px:
+                target = prev_target
+            if prev_zoom is not None and abs(target_zoom - prev_zoom) < cfg.zoom_deadband:
+                target_zoom = prev_zoom
+        prev_key = key
+        prev_target = target
+        prev_zoom = target_zoom
 
         clamped = _clamp_center(target, (frame_w, frame_h), max(cfg.min_zoom, target_zoom))
         raw_targets[index, 0] = clamped[0]

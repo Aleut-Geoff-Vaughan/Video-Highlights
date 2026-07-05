@@ -168,6 +168,8 @@ def _normalize_event_type(value: object, fallback: str = "shot") -> str:
         "kickoff",
         "foul",
         "save",
+        "yellow_card",
+        "red_card",
     }
     event_type = str(value or "").strip().lower()
     if event_type in allowed:
@@ -701,6 +703,7 @@ class JobRunner:
                 goal_box_left=dict(config.get("goal_box_left") or {}) if isinstance(config.get("goal_box_left"), dict) else None,
                 goal_box_right=dict(config.get("goal_box_right") or {}) if isinstance(config.get("goal_box_right"), dict) else None,
                 detect_cards=bool(config.get("detect_cards", True)),
+                broadcast_reel=bool(config.get("broadcast_reel", True)),
             )
 
             artifacts = sorted(str(path.resolve()) for path in Path(output_dir).glob("*.mp4"))

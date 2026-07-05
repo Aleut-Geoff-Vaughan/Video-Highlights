@@ -125,6 +125,19 @@ Set pieces and cards:
    confidence, and review crops are saved to `card_crops/` for
    verification and training.
 
+Broadcast reel (default; `--no-broadcast-reel` for a plain montage):
+
+1. **Story-aware boundaries**: goal clips start where the move began (the
+   dead ball or change of attacking direction that launched it) and every
+   clip ends when the crowd noise decays back to baseline - not at fixed
+   offsets.
+2. **`highlights_reel.mp4`**: cold-open teaser of the best moment,
+   chronological clips joined with crossfades and per-clip audio
+   normalization, **slow-motion replays spliced in after goals**, fade-out
+   ending.
+3. **Operator deadband**: within a state the camera ignores sub-1.5%-of-frame
+   aim changes, so it rests like a human operator instead of micro-hunting.
+
 Debug & training outputs:
 
 1. `--debug` prints every diagnostic; `--log-file` captures a full timestamped

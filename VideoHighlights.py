@@ -83,6 +83,11 @@ from backend.services.game_tracking import (
     summarize_states,
 )
 from backend.services.card_detection import detect_card_events, stopped_play_windows
+from backend.services.broadcast import (
+    build_broadcast_reel,
+    compute_audio_envelope,
+    refine_intervals,
+)
 from backend.services.camera_planner import CameraPlan, plan_camera, slice_plan
 from backend.services.camera_render import render_camera_plan_video
 
@@ -1713,6 +1718,7 @@ def process_video_highlights(
     goal_box_left: Optional[Dict[str, float]] = None,
     goal_box_right: Optional[Dict[str, float]] = None,
     detect_cards: bool = True,
+    broadcast_reel: bool = True,
 ) -> bool:
     """Public pipeline entry point used by the CLI, GUI, and API worker.
 
@@ -1757,6 +1763,7 @@ def process_video_highlights(
             goal_box_left=goal_box_left,
             goal_box_right=goal_box_right,
             detect_cards=detect_cards,
+            broadcast_reel=broadcast_reel,
         )
     finally:
         teardown_run_logging(run_log_handler)
@@ -1828,6 +1835,7 @@ def _process_video_highlights_impl(
     goal_box_left: Optional[Dict[str, float]] = None,
     goal_box_right: Optional[Dict[str, float]] = None,
     detect_cards: bool = True,
+    broadcast_reel: bool = True,
 ) -> bool:
     """
     Core video highlights processing function.
@@ -2166,6 +2174,21 @@ def _process_video_highlights_impl(
                 "intervals after adding %d goal/%d set-piece/%d card interval(s): %d",
                 len(goal_intervals), len(threat_set_pieces), len(card_events), len(intervals),
             )
+
+        # Broadcast boundary refinement: goals start where the move began
+        # (dead ball / change of attacking direction) and every clip ends
+        # when the crowd noise has decayed, not at a fixed offset.
+        audio_envelope = None if no_audio else compute_audio_envelope(processing_video)
+        boundary_events = (
+            [{"t": g.t, "event_type": "goal", "side": g.side} for g in goal_events]
+            + [{"t": c.t, "event_type": c.kind} for c in card_events]
+            + [{"t": sp.t_kick, "event_type": sp.kind, "side": sp.side} for sp in threat_set_pieces]
+        )
+        intervals = refine_intervals(
+            intervals, boundary_events, ball_track, game_segments,
+            audio_envelope, analysis_end_s,
+        )
+        LOGGER.debug("intervals after broadcast boundary refinement: %d", len(intervals))
 
         # Enforce minimum clip length and clamp to video duration
         clamped_intervals = []
@@ -2554,10 +2577,40 @@ def _process_video_highlights_impl(
                 track_time_offset_seconds=trim_offset,
             )
 
+        # Broadcast reel: cold-open teaser, chronological clips with
+        # crossfades and normalized audio, slow-motion replays after goals.
+        reel_path: Optional[str] = None
+        if clip_paths and broadcast_reel:
+            try:
+                existing = {os.path.basename(p) for p in clip_paths}
+                clip_specs: List[Dict[str, object]] = []
+                for k, (s, e) in enumerate(original_intervals, start=1):
+                    name = f"highlight_{k:02d}.mp4"
+                    if name not in existing:
+                        continue
+                    bm = bookmarks[k - 1] if k - 1 < len(bookmarks) else {}
+                    detected = str(bm.get("label", "")).endswith("_detected")
+                    clip_specs.append({
+                        "path": os.path.join(output_dir, name),
+                        "start_s": s,
+                        "end_s": e,
+                        "event_type": bm.get("event_type") if detected else None,
+                        "occurred_at_s": bm.get("occurred_at_s"),
+                        "confidence": bm.get("confidence"),
+                    })
+                reel_path = build_broadcast_reel(
+                    clip_specs, os.path.join(output_dir, "highlights_reel.mp4")
+                )
+                if reel_path:
+                    print(f"[reel] Broadcast reel: {reel_path}")
+            except Exception as reel_exc:
+                print(f"[warn] Broadcast reel failed ({reel_exc}); falling back to plain montage")
+                reel_path = None
+
         # Montage (best-effort: clips are the deliverable, so a montage
         # failure - e.g. moviepy missing on this host - must not fail a run
         # whose clips all rendered successfully).
-        if clip_paths:
+        if clip_paths and not reel_path:
             try:
                 VideoFileClip, concatenate_videoclips = _import_moviepy()
                 clips = []
@@ -2619,6 +2672,7 @@ def main():
     ap.add_argument("--goal-box-left", type=str, default=None, help="Manual left goal box as x1,y1,x2,y2 (normalized 0-1 or pixels); overrides auto estimate")
     ap.add_argument("--goal-box-right", type=str, default=None, help="Manual right goal box as x1,y1,x2,y2 (normalized 0-1 or pixels); overrides auto estimate")
     ap.add_argument("--no-card-detection", action="store_true", help="Disable yellow/red card flagging (enabled by default)")
+    ap.add_argument("--no-broadcast-reel", action="store_true", help="Build the plain montage instead of the broadcast reel (cold open, crossfades, goal replays)")
     args = ap.parse_args()
 
     def _parse_goal_box(raw: Optional[str], flag: str) -> Optional[Dict[str, float]]:
@@ -2748,6 +2802,7 @@ def main():
         goal_box_left=goal_box_left,
         goal_box_right=goal_box_right,
         detect_cards=not args.no_card_detection,
+        broadcast_reel=not args.no_broadcast_reel,
     )
 
     if not success:
