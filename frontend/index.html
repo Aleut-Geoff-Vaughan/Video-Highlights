@@ -238,7 +238,7 @@ async function renderJobs(){
       $('#jl').innerHTML=rows.length?`<table><thead><tr><th>match</th><th>job</th><th>status</th><th>stage</th><th style="width:220px">progress</th><th></th></tr></thead><tbody>${rows.map(r=>`
         <tr><td>${esc(r.match)}</td><td style="font-family:monospace;font-size:11px">${esc(r.job_id)}</td>
         <td><span class="status ${esc(r.status)}">${esc(r.status)}</span></td><td>${esc(r.stage||'')}</td>
-        <td><div class="bar"><i style="width:${Math.round(100*(+r.progress||0))}%"></i></div></td>
+        <td><div class="bar"><i style="width:${Math.round(100*(+r.progress||0))}%"></i></div><small style="color:var(--dim)">${Math.round(100*(+r.progress||0))}%</small></td>
         <td>${r.status==='completed'?`<button class="btn2" onclick="go('library','${esc(r.job_id)}')">Review</button>`:''}
             <button class="btn2" onclick="showLogs('${esc(r.job_id)}')">Logs</button></td></tr>`).join('')}</tbody></table>`
         :'<div class="empty">No jobs yet.</div>';
@@ -246,12 +246,28 @@ async function renderJobs(){
     }catch(e){$('#jl').innerHTML=`<div class="empty">${esc(e.message)}</div>`;clearInterval(jobsTimer)}
   }
   await load();
-  jobsTimer=setInterval(load,5000);
+  jobsTimer=setInterval(()=>{load();refreshLogs()},5000);
 }
+let logsFor=null;
 async function showLogs(id){
-  const data=await j(`${API}/jobs/${id}/logs?limit=200`).catch(e=>({error:e.message}));
-  const lines=(data.items||data.logs||[]).map(l=>`${l.created_at||''} [${l.level||''}] ${l.stage||''}: ${l.message||''}`).join('\n');
-  $('#jlog').innerHTML=`<div class="panel" style="margin-top:16px"><h3>Logs - ${esc(id)}</h3><pre>${esc(lines||JSON.stringify(data,null,2))}</pre></div>`;
+  logsFor=id;
+  await refreshLogs();
+}
+async function refreshLogs(){
+  if(!logsFor)return;
+  const data=await j(`${API}/jobs/${logsFor}/logs?limit=400`).catch(e=>({error:e.message}));
+  const rows=(data.items||data.logs||[]);
+  rows.sort((a,b)=>String(b.created_at||'').localeCompare(String(a.created_at||'')));
+  const lines=rows.map(l=>{
+    const d=l.data||{};
+    const extra=[d.sub_stage,d.device,
+      d.processed_tracking_frames!=null?`frames ${d.processed_tracking_frames}/${d.estimated_tracking_frames}`:null,
+      d.written_frames!=null?`rendered ${d.written_frames}/${d.total_frames}`:null,
+      d.progress!=null?`${Math.round(100*d.progress)}%`:null
+    ].filter(Boolean).join(' | ');
+    return `${(l.created_at||'').slice(11,19)} [${l.level||''}] ${l.stage||''}: ${l.message||''}${extra?'  ('+extra+')':''}`;
+  }).join('\n');
+  $('#jlog').innerHTML=`<div class="panel" style="margin-top:16px"><h3>Live workflow log - ${esc(logsFor)} <button class="btn2" style="float:right" onclick="logsFor=null;$('#jlog').innerHTML=''">close</button></h3><pre>${esc(lines||'no entries yet')}</pre></div>`;
 }
 render();
 </script>

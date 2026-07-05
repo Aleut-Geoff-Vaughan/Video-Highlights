@@ -657,7 +657,10 @@ class JobRunner:
                             "progress": round(progress_job.progress, 4),
                             **dict(data or {}),
                         },
-                        force_persist=_profile_allows(progress_config, "detailed"),
+                        # Engine progress IS the workflow view: always
+                        # persist it (the emitter above already rate-limits
+                        # to stage changes / +1.5% progress / new messages).
+                        force_persist=True,
                     )
                 progress_state.update(
                     {
