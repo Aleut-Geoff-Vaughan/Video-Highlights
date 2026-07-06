@@ -21,7 +21,7 @@ from ..config import settings
 router = APIRouter(tags=["studio"])
 
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
-_ALLOWED_SUFFIXES = {".mp4", ".png", ".jpg", ".json", ".csv", ".jsonl", ".log"}
+_ALLOWED_SUFFIXES = {".mp4", ".png", ".jpg", ".json", ".csv", ".jsonl", ".log", ".md"}
 
 
 def _output_root() -> Path:
@@ -75,6 +75,8 @@ def _run_summary(path: Path) -> Dict[str, object]:
         "set_piece_events": states.get("set_piece_events", []),
         "trim_offset_seconds": states.get("trim_offset_seconds", 0.0),
         "team_stats": _read_json(path / "analysis_team_stats.json"),
+        "match_report": (path / "match_report.md").read_text(encoding="utf-8")[:20000]
+        if (path / "match_report.md").exists() else None,
         "videos": videos,
         "card_crops": crops,
         "bookmarks": manifest.get("bookmarks", []),

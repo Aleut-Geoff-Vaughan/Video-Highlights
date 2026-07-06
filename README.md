@@ -284,7 +284,7 @@ JWT support is also available:
 
 ### LLM Analysis Provider
 
-The match assistant endpoints (`/v1/matches/{match_id}/agent/*`) can run with fallback summaries, OpenAI, or a local LLM.
+The match assistant endpoints (`/v1/matches/{match_id}/agent/*`) and the per-run AI match report (`match_report.md`, rendered on the run page) can run with fallback summaries, OpenAI, or a local LLM. The same `VH_LLM_*` settings drive both.
 
 OpenAI cloud:
 
@@ -484,38 +484,93 @@ docker run --rm -v C:\Path\To\Videos:/media geoffvaughan/video-highlights:latest
   --camera-mode follow_ball --zoom-factor 1.8 --debug-video
 ```
 
-## Docker and GPU Notes
+## Maximize Your Hardware
 
-Containerized GPU execution supports local PC hosts, NVIDIA-capable edge systems, and cloud GPU nodes when configured correctly.
+Two container images ship with the repo:
 
-Required host setup:
+| Image | File | For |
+| --- | --- | --- |
+| CPU (default) | `Dockerfile` | Any machine; published to Docker Hub on merge to `main` |
+| GPU | `Dockerfile.gpu` | NVIDIA rigs (x86_64) and NVIDIA DGX Spark (arm64) |
 
-1. NVIDIA drivers installed
-2. NVIDIA Container Toolkit installed
-3. CUDA-compatible runtime/image stack
-4. GPU worker run with `--gpus all`
+### High-End PC ("hardcore rig")
 
-Example:
+Host setup: NVIDIA driver + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) (bundled with Docker Desktop on Windows - just enable GPU support).
+
+Build and run the GPU image with everything opened up:
 
 ```bash
-docker run --rm -it --gpus all your-image:gpu
+docker build -f Dockerfile.gpu -t video-highlights:gpu .
+
+docker run -d --name vh-gpu \
+  --gpus all \
+  --ipc=host --shm-size=8g \
+  --cpus="0.000" --memory=0 \
+  -p 8000:8000 \
+  -v vh-outputs:/app/outputs -v vh-storage:/app/storage \
+  video-highlights:gpu
 ```
+
+- `--gpus all` exposes every GPU; `NVIDIA_DRIVER_CAPABILITIES=compute,utility,video` is baked into the image so ffmpeg can use **h264_nvenc** for GPU-encoded rendering, not just CUDA inference.
+- `--cpus="0.000" --memory=0` means *no limit* - the container may use every core and all RAM. On Docker Desktop for Windows also raise the WSL2 limits in `%UserProfile%\.wslconfig` (e.g. `memory=48GB`, `processors=24`), because WSL2 caps Docker below your real hardware by default.
+- `--ipc=host --shm-size=8g` prevents PyTorch shared-memory stalls on big videos.
+- Mount your recordings folder read-only (e.g. `-v D:\matches:/videos:ro` on Windows) and use the Create page's **Local file on the server** source with `/videos/match.mp4` - no upload step at all.
+
+Then push the quality knobs up in the Create page (they map to job config):
+
+| Knob | Fast test | Max quality (big GPU) |
+| --- | --- | --- |
+| `inference_imgsz` | 736 | 1280-1536 |
+| `vid_stride` | 2 | 1 |
+| Detector | `yolo26s.pt` | `yolo26m.pt` / `yolo26l.pt` |
+| Processing window | First 10 min | Full match |
+
+Verify the GPU is live: `curl http://localhost:8000/v1/health/gpu` and check the job log for `Using device: cuda` and the GPU name.
+
+### NVIDIA DGX Spark
+
+The Spark is arm64 (Grace + Blackwell GB10) with a CUDA 13 driver stack, so build the GPU image natively on it with the cu130 wheel index:
+
+```bash
+# on the Spark
+git clone https://github.com/Aleut-Geoff-Vaughan/Video-Highlights.git && cd Video-Highlights
+docker build -f Dockerfile.gpu \
+  --build-arg CUDA_IMAGE=nvidia/cuda:13.0.0-runtime-ubuntu24.04 \
+  --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cu130 \
+  -t video-highlights:spark .
+
+docker run -d --name vh-spark --gpus all --ipc=host --shm-size=16g \
+  -p 8000:8000 -v vh-outputs:/app/outputs -v vh-storage:/app/storage \
+  video-highlights:spark
+```
+
+Spark tuning: its unified 128 GB memory removes the usual VRAM ceiling - run `inference_imgsz` 1280+, `vid_stride` 1, and the larger detector weights without concern, and it comfortably co-hosts an Ollama model alongside the video worker for the AI match report (see below). To cross-build from an x86 machine instead: `docker buildx build --platform linux/arm64 ...` with the same build args.
+
+### Local AI (Ollama) for Match Reports
+
+Each processing run can end with an AI-written match report (`match_report.md`, shown on the run page). YOLO remains the analysis engine - the LLM only reads the structured results (goals, cards, possession, set pieces, data-quality stats) and writes the narrative plus tuning suggestions. Wire it to any local or remote OpenAI-compatible endpoint:
+
+```bash
+# Ollama running on the host (or on the Spark)
+docker run ... \
+  -e VH_LLM_PROVIDER=ollama \
+  -e VH_LLM_BASE_URL=http://host.docker.internal:11434 \
+  -e VH_LLM_MODEL=llama3.1:8b \
+  video-highlights:gpu
+```
+
+Any OpenAI-compatible API works the same way (`VH_LLM_PROVIDER=openai_compatible`, `VH_LLM_BASE_URL=...`, `VH_LLM_API_KEY=...`). With no provider configured the report falls back to a deterministic template, and the **AI match report** checkbox on the Create page turns it off per run.
 
 ## Docker Desktop Launch (This Repo)
 
 1. Open Docker Desktop and confirm the engine is running.
-2. From repo root, launch core services:
+2. From repo root, launch the stack:
 
 ```bash
-docker compose up --build api worker api-client processing-ui admin-global admin-tenant
+docker compose up --build api worker
 ```
 
-3. Open apps:
-- API: `http://localhost:8000/docs`
-- API Client: `http://localhost:8501`
-- Processing Portal (dashboard + runs): `http://localhost:8504`
-- Global Admin Portal: `http://localhost:8502`
-- Tenant Admin Portal: `http://localhost:8503`
+3. Open the Studio portal at `http://localhost:8000` (API docs at `http://localhost:8000/docs`).
 
 Windows convenience:
 
@@ -529,10 +584,10 @@ Stop all containers quickly:
 stop_docker.bat
 ```
 
-GPU worker profile (requires NVIDIA toolkit and Docker GPU support):
+GPU worker profile (builds `Dockerfile.gpu`; requires NVIDIA toolkit and Docker GPU support):
 
 ```bash
-docker compose --profile gpu up --build api worker-gpu api-client processing-ui admin-global admin-tenant
+docker compose --profile gpu up --build api worker-gpu
 ```
 
 Windows convenience:
