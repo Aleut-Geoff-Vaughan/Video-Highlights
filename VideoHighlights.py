@@ -87,7 +87,10 @@ from backend.services.team_classification import (
     TeamConfig,
     classify_player_teams,
     compute_team_stats,
+    detect_team_colors,
+    hex_to_bgr,
 )
+from backend.services.match_report import generate_match_report
 from backend.services.broadcast import (
     build_broadcast_reel,
     compute_audio_envelope,
@@ -1742,6 +1745,8 @@ def process_video_highlights(
     team_right: str = "AWAY",
     team_left_color: Optional[str] = None,
     team_right_color: Optional[str] = None,
+    auto_detect_team_colors: bool = False,
+    llm_report: bool = True,
 ) -> bool:
     """Public pipeline entry point used by the CLI, GUI, and API worker.
 
@@ -1792,6 +1797,8 @@ def process_video_highlights(
             team_right=team_right,
             team_left_color=team_left_color,
             team_right_color=team_right_color,
+            auto_detect_team_colors=auto_detect_team_colors,
+            llm_report=llm_report,
         )
     finally:
         teardown_run_logging(run_log_handler)
@@ -1869,6 +1876,8 @@ def _process_video_highlights_impl(
     team_right: str = "AWAY",
     team_left_color: Optional[str] = None,
     team_right_color: Optional[str] = None,
+    auto_detect_team_colors: bool = False,
+    llm_report: bool = True,
 ) -> bool:
     """
     Core video highlights processing function.
@@ -2165,6 +2174,29 @@ def _process_video_highlights_impl(
                 )
 
         team_stats: Dict[str, object] = {}
+        if auto_detect_team_colors:
+            emit_progress(progress_callback, "game_analysis", 0.845, "Auto-detecting jersey colors")
+            try:
+                detected = detect_team_colors(processing_video, player_positions)
+                if detected:
+                    det_a, det_b = detected
+                    if team_left_color and team_right_color:
+                        # Detected colors come back in population order; keep
+                        # each team name attached to the kit it was picked for
+                        # by giving team A the detected color nearest its pick.
+                        pick_a = np.asarray(hex_to_bgr(team_left_color), dtype=float)
+                        if np.linalg.norm(np.asarray(hex_to_bgr(det_a), dtype=float) - pick_a) > np.linalg.norm(
+                            np.asarray(hex_to_bgr(det_b), dtype=float) - pick_a
+                        ):
+                            det_a, det_b = det_b, det_a
+                    team_left_color, team_right_color = det_a, det_b
+                    print(f"[team] Auto-detected jersey colors: {team_left_color} vs {team_right_color}")
+                elif team_left_color and team_right_color:
+                    print("[warn] Could not auto-detect jersey colors; keeping the configured colors")
+                else:
+                    print("[warn] Could not auto-detect jersey colors (not enough distinct kit pixels)")
+            except Exception as color_exc:
+                print(f"[warn] Jersey color auto-detect failed: {color_exc}")
         if team_left_color and team_right_color:
             emit_progress(progress_callback, "game_analysis", 0.846, "Classifying teams by uniform color")
             try:
@@ -2463,6 +2495,23 @@ def _process_video_highlights_impl(
             "bookmarks": bookmarks,
         }
         manifest_path, csv_path = write_analysis_bookmark_files(output_dir, manifest)
+        if llm_report:
+            try:
+                report_md = generate_match_report({
+                    "goal_events": original_goal_events,
+                    "card_events": original_card_events,
+                    "set_piece_events": original_set_pieces,
+                    "state_summary_s": state_summary,
+                    "team_stats": team_stats,
+                    "ball_coverage_fraction": round(ball_coverage, 3),
+                    "bookmarks": bookmarks[:60],
+                })
+                report_path = os.path.join(output_dir, "match_report.md")
+                with open(report_path, "w", encoding="utf-8") as handle:
+                    handle.write(report_md)
+                print(f"[report] Match report: {report_path}")
+            except Exception as report_exc:
+                print(f"[warn] Match report failed: {report_exc}")
         print(f"[analysis] Bookmark manifest: {manifest_path}")
         print(f"[analysis] Bookmark table: {csv_path}")
         emit_progress(
@@ -2757,6 +2806,8 @@ def main():
     ap.add_argument("--no-scorebug", action="store_true", help="Disable the score + clock overlay on follow_ball renders")
     ap.add_argument("--team-left-color", type=str, default=None, help="Jersey hex color of the team defending the LEFT goal at kickoff (e.g. #d32f2f) - enables team stats and goal attribution")
     ap.add_argument("--team-right-color", type=str, default=None, help="Jersey hex color of the team defending the RIGHT goal at kickoff")
+    ap.add_argument("--auto-team-colors", action="store_true", help="Auto-detect the two jersey colors from sampled frames when colors are not provided")
+    ap.add_argument("--no-llm-report", action="store_true", help="Skip the LLM match report (enabled when VH_LLM_PROVIDER is configured)")
     ap.add_argument("--fast", action="store_true", help="~2x faster tracking: analyze every 2nd frame at reduced inference size (slightly lower detection fidelity)")
     args = ap.parse_args()
 
@@ -2893,6 +2944,8 @@ def main():
         team_right=args.team_right,
         team_left_color=args.team_left_color,
         team_right_color=args.team_right_color,
+        auto_detect_team_colors=args.auto_team_colors,
+        llm_report=not args.no_llm_report,
         vid_stride=2 if args.fast else 1,
         inference_imgsz=736 if args.fast else 960,
     )

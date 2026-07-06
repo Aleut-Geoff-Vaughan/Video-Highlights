@@ -264,3 +264,77 @@ def compute_team_stats(
             {"t": round(t, 3), "into_goal": side, "team": scorer, "defending_team": defender}
         )
     return stats
+
+
+def detect_team_colors(
+    video_path: str,
+    player_positions: Optional[np.ndarray],
+    samples: int = 7,
+    patch_half_px: int = 12,
+) -> Optional[Tuple[str, str]]:
+    """Suggest the two team jersey colors from a handful of frames.
+
+    Samples torso patches around tracked player positions in ``samples``
+    frames spread across the match, drops grass pixels, and k-means-clusters
+    the remaining colors (k=3: two kits + referee/noise). The two most
+    populous, mutually distinct clusters become the suggested hex colors.
+    Returns (hex_a, hex_b) or None when there is not enough signal.
+    """
+    if player_positions is None or len(player_positions) < 40:
+        return None
+    cv2 = _import_cv2()
+    positions = np.asarray(player_positions, dtype=np.float64)
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        return None
+    pixels: List[np.ndarray] = []
+    try:
+        t_min, t_max = float(positions[:, 0].min()), float(positions[:, 0].max())
+        for t in np.linspace(t_min + 1.0, max(t_min + 1.0, t_max - 1.0), samples):
+            cap.set(cv2.CAP_PROP_POS_MSEC, float(t) * 1000.0)
+            ok, frame = cap.read()
+            if not ok:
+                continue
+            actual_t = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+            h, w = frame.shape[:2]
+            near = positions[np.abs(positions[:, 0] - actual_t) <= 0.2][:25]
+            for _, px, py in near:
+                x0, x1 = int(max(0, px - patch_half_px)), int(min(w, px + patch_half_px))
+                y0, y1 = int(max(0, py - patch_half_px)), int(min(h, py + patch_half_px))
+                if x1 - x0 < 4 or y1 - y0 < 4:
+                    continue
+                patch = frame[y0:y1, x0:x1].reshape(-1, 3)
+                hsv = cv2.cvtColor(patch.reshape(-1, 1, 3), cv2.COLOR_BGR2HSV).reshape(-1, 3)
+                grass = (hsv[:, 0] > 35) & (hsv[:, 0] < 85) & (hsv[:, 1] > 60)
+                kept = patch[~grass]
+                if len(kept):
+                    pixels.append(kept)
+    finally:
+        cap.release()
+    if not pixels:
+        return None
+    data = np.concatenate(pixels).astype(np.float32)
+    if len(data) < 200:
+        return None
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0)
+    _, labels, centers = cv2.kmeans(data, 3, None, criteria, 5, cv2.KMEANS_PP_CENTERS)
+    counts = np.bincount(labels.flatten(), minlength=3)
+    order = np.argsort(counts)[::-1]
+    picked: List[np.ndarray] = []
+    for idx in order:
+        center = centers[idx]
+        if picked and float(np.linalg.norm(center - picked[0])) < 60.0:
+            continue  # same kit seen twice (shadow/sun) - need a DIFFERENT color
+        picked.append(center)
+        if len(picked) == 2:
+            break
+    if len(picked) < 2:
+        return None
+
+    def _hex(bgr: np.ndarray) -> str:
+        b, g, r = (int(max(0, min(255, round(float(v))))) for v in bgr)
+        return f"#{r:02x}{g:02x}{b:02x}"
+
+    hex_a, hex_b = _hex(picked[0]), _hex(picked[1])
+    LOGGER.info("auto-detected jersey colors: %s vs %s", hex_a, hex_b)
+    return hex_a, hex_b

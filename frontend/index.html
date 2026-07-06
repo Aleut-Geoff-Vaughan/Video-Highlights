@@ -142,6 +142,7 @@ async function renderRun(id){
           <div class="metric"><div class="v">${(r.stats?.bookmark_count)??0}</div><div class="l">Bookmarks</div></div>
         </div>
         ${teamPanel(r.team_stats)}
+        ${reportPanel(r.match_report)}
         ${panelList('Goals',(r.goal_events||[]).map(g=>`${fmt(g.t)}${g.team?' - <b>'+esc(g.team)+'</b>':''} - ${esc(g.side)} goal (${(+g.confidence).toFixed(2)})<br><small style="color:var(--dim)">${esc(g.reason)}</small>`))}
         ${panelList('Set pieces',(r.set_piece_events||[]).map(s=>`${fmt(s.t_kick)} - ${esc(s.kind)}${s.side?' ('+esc(s.side)+')':''}`))}
         ${panelList('Cards',(r.card_events||[]).map(c=>`${fmt(c.t)} - ${esc(c.kind)} (${(+c.confidence).toFixed(2)})`))}
@@ -168,6 +169,18 @@ function teamPanel(ts){
   </div>`;
 }
 function panelList(title,items){return items.length?`<div class="panel"><h3>${title}</h3>${items.map(i=>`<div style="margin-bottom:8px">${i}</div>`).join('')}</div>`:''}
+function reportPanel(md){
+  if(!md)return '';
+  const html=esc(md).split(/\r?\n/).map(line=>{
+    if(/^###\s/.test(line))return `<div style="font-weight:700;margin:10px 0 4px">${line.slice(4)}</div>`;
+    if(/^##\s/.test(line))return `<div style="font-weight:700;font-size:14px;margin:12px 0 4px">${line.slice(3)}</div>`;
+    if(/^#\s/.test(line))return `<div style="font-weight:700;font-size:15px;margin:12px 0 4px">${line.slice(2)}</div>`;
+    if(/^[-*]\s/.test(line))return `<div style="padding-left:14px">• ${line.slice(2)}</div>`;
+    if(!line.trim())return '<div style="height:6px"></div>';
+    return `<div>${line}</div>`;
+  }).join('').replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>');
+  return `<div class="panel"><h3>AI match report</h3><div style="font-size:12.5px;max-height:420px;overflow:auto">${html}</div></div>`;
+}
 function setView(key){
   document.querySelectorAll('#vb button').forEach(b=>b.classList.toggle('active',b.dataset.v===key));
   const id=location.hash.split('/')[1];
@@ -189,17 +202,28 @@ function renderCreate(){
         <div><label>Match name</label><input type="text" id="c_name" value="Match" required></div>
         <div><label>Date</label><input type="date" id="c_date"></div>
       </div>
-      <label>Match video</label><input type="file" id="c_file" accept="video/*" required>
+      <label>Source</label>
+      <div class="checks">
+        <label><input type="radio" name="c_src" id="c_src_up" checked onchange="srcMode()"> Upload a file</label>
+        <label><input type="radio" name="c_src" id="c_src_local" onchange="srcMode()"> Local file on the server (no upload)</label>
+      </div>
+      <div id="c_uprow"><label>Match video</label><input type="file" id="c_file" accept="video/*"></div>
+      <div id="c_pathrow" style="display:none"><label>Absolute path on the server / container</label>
+        <input type="text" id="c_path" placeholder="/data/videos/match.mp4">
+        <div class="note">Skips the upload entirely - point at a file already on the machine running the worker (fastest for 1-hour recordings).</div></div>
     </div>
     <div class="panel"><h3>Teams &amp; jersey colors</h3>
       <div class="row">
-        <div><label>Team defending LEFT goal at kickoff</label><input type="text" id="c_left" value="HOME">
+        <div><label>Team A name</label><input type="text" id="c_left" value="HOME">
           <label>Jersey color</label><input type="color" id="c_leftcol" value="#d32f2f" style="width:100%;height:38px;background:var(--panel2);border:1px solid var(--line);border-radius:8px"></div>
-        <div><label>Team defending RIGHT goal at kickoff</label><input type="text" id="c_right" value="AWAY">
+        <div><label>Team B name</label><input type="text" id="c_right" value="AWAY">
           <label>Jersey color</label><input type="color" id="c_rightcol" value="#1976d2" style="width:100%;height:38px;background:var(--panel2);border:1px solid var(--line);border-radius:8px"></div>
       </div>
-      <div class="checks"><label><input type="checkbox" id="c_teams" checked> Team stats &amp; goal attribution by jersey color</label></div>
-      <div class="note">Pick the dominant jersey color of each team - possession, territory, and per-team goals depend on it.</div>
+      <div class="checks">
+        <label><input type="checkbox" id="c_teams" checked> Team stats &amp; goal attribution by jersey color</label>
+        <label><input type="checkbox" id="c_autocolors" checked> Auto-detect jersey colors from the video</label>
+      </div>
+      <div class="note">With auto-detect on, a few frames are sampled and the two dominant kit colors are found for you - the pickers above are only a fallback. The team overlay in results shows which color mapped to which name.</div>
     </div>
     <div class="panel"><h3>Camera</h3>
       <div class="row3">
@@ -225,13 +249,20 @@ function renderCreate(){
       <div class="checks">
         <label><input type="checkbox" id="c_reel" checked> Broadcast reel (cold open, replays)</label>
         <label><input type="checkbox" id="c_cards" checked> Yellow/red card detection</label>
+        <label><input type="checkbox" id="c_llm" checked> AI match report (Ollama / API)</label>
       </div>
     </div>
-    <div class="panel"><h3>Trim &amp; diagnostics</h3>
-      <div class="row">
-        <div><label>Trim start (MM:SS, optional)</label><input type="text" id="c_tstart" placeholder=""></div>
-        <div><label>Trim end (MM:SS, optional)</label><input type="text" id="c_tend" placeholder=""></div>
+    <div class="panel"><h3>Processing window &amp; diagnostics</h3>
+      <div class="viewbar" style="margin:2px 0 10px">
+        <button type="button" class="btn2" onclick="setWindow('','')">Full match</button>
+        <button type="button" class="btn2" onclick="setWindow('00:00','05:00')">First 5 min</button>
+        <button type="button" class="btn2" onclick="setWindow('00:00','10:00')">First 10 min (test run)</button>
       </div>
+      <div class="row">
+        <div><label>Window start (MM:SS, optional)</label><input type="text" id="c_tstart" placeholder=""></div>
+        <div><label>Window end (MM:SS, optional)</label><input type="text" id="c_tend" placeholder=""></div>
+      </div>
+      <div class="note">Upload the full 1-hour recording once, then process a short window to validate settings quickly - re-run with the full window when it looks right.</div>
       <div class="checks">
         <label><input type="checkbox" id="c_debug" checked> Debug video (camera decisions + why)</label>
         <label><input type="checkbox" id="c_train"> Training data dump</label>
@@ -241,24 +272,39 @@ function renderCreate(){
     <div id="c_prog" style="margin-top:14px"></div>
   </form>`;
 }
+function srcMode(){
+  const local=$('#c_src_local').checked;
+  $('#c_uprow').style.display=local?'none':'';
+  $('#c_pathrow').style.display=local?'':'none';
+}
+function setWindow(start,end){$('#c_tstart').value=start;$('#c_tend').value=end;}
 async function createRun(ev){
   ev.preventDefault();
   const btn=$('#c_go');btn.disabled=true;
   const prog=$('#c_prog');
   try{
+    const local=$('#c_src_local').checked;
+    const file=local?null:$('#c_file').files[0];
+    const path=local?$('#c_path').value.trim():'';
+    if(local&&!path)throw new Error('Enter the server path to the video.');
+    if(!local&&!file)throw new Error('Choose a video file to upload.');
     prog.innerHTML='Creating match…';
-    const file=$('#c_file').files[0];
-    const m=await j(`${API}/matches`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:$('#c_name').value,home_team_name:$('#c_left').value,away_team_name:$('#c_right').value,match_date:$('#c_date').value||null,source_video_path:file.name,metadata:{}})});
-    prog.innerHTML='Uploading… <div class="bar"><i id="upbar" style="width:0"></i></div>';
-    await new Promise((res,rej)=>{
-      const xhr=new XMLHttpRequest();
-      xhr.open('POST',`${API}/matches/${m.match_id}/assets/upload`);
-      xhr.setRequestHeader('X-Tenant-Id',TENANT);
-      xhr.upload.onprogress=e=>{if(e.lengthComputable)$('#upbar').style.width=(100*e.loaded/e.total)+'%'};
-      xhr.onload=()=>xhr.status<300?res():rej(new Error(xhr.responseText));
-      xhr.onerror=()=>rej(new Error('upload failed'));
-      const fd=new FormData();fd.append('file',file);xhr.send(fd);
-    });
+    const m=await j(`${API}/matches`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:$('#c_name').value,home_team_name:$('#c_left').value,away_team_name:$('#c_right').value,match_date:$('#c_date').value||null,source_video_path:local?path:file.name,metadata:{}})});
+    if(local){
+      prog.innerHTML='Registering local video…';
+      await j(`${API}/matches/${m.match_id}/assets/register-local`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path})});
+    }else{
+      prog.innerHTML='Uploading… <div class="bar"><i id="upbar" style="width:0"></i></div>';
+      await new Promise((res,rej)=>{
+        const xhr=new XMLHttpRequest();
+        xhr.open('POST',`${API}/matches/${m.match_id}/assets/upload`);
+        xhr.setRequestHeader('X-Tenant-Id',TENANT);
+        xhr.upload.onprogress=e=>{if(e.lengthComputable)$('#upbar').style.width=(100*e.loaded/e.total)+'%'};
+        xhr.onload=()=>xhr.status<300?res():rej(new Error(xhr.responseText));
+        xhr.onerror=()=>rej(new Error('upload failed'));
+        const fd=new FormData();fd.append('file',file);xhr.send(fd);
+      });
+    }
     prog.innerHTML='Starting job…';
     const config={camera_mode:$('#c_cam').value,zoom_factor:+$('#c_zoom').value,
       render_full_follow_cam:$('#c_full').checked,broadcast_reel:$('#c_reel').checked,
@@ -269,8 +315,12 @@ async function createRun(ev){
       min_clip_duration:+$('#c_minclip').value,
       speed_sensitivity:+$('#c_speedsens').value,audio_sensitivity:+$('#c_audiosens').value,
       vid_stride:$('#c_speed').value==='fast'?2:1,
-      inference_imgsz:$('#c_speed').value==='fast'?736:960};
-    if($('#c_teams').checked){config.team_left_color=$('#c_leftcol').value;config.team_right_color=$('#c_rightcol').value;}
+      inference_imgsz:$('#c_speed').value==='fast'?736:960,
+      llm_report:$('#c_llm').checked};
+    if($('#c_teams').checked){
+      config.team_left_color=$('#c_leftcol').value;config.team_right_color=$('#c_rightcol').value;
+      config.auto_detect_team_colors=$('#c_autocolors').checked;
+    }
     if($('#c_tstart').value.trim())config.trim_start=$('#c_tstart').value.trim();
     if($('#c_tend').value.trim())config.trim_end=$('#c_tend').value.trim();
     const job=await j(`${API}/matches/${m.match_id}/jobs`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({config})});

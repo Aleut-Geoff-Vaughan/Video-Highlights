@@ -712,6 +712,8 @@ class JobRunner:
                 team_right=str(config.get("team_right") or "AWAY"),
                 team_left_color=str(config.get("team_left_color")) if config.get("team_left_color") else None,
                 team_right_color=str(config.get("team_right_color")) if config.get("team_right_color") else None,
+                auto_detect_team_colors=bool(config.get("auto_detect_team_colors", False)),
+                llm_report=bool(config.get("llm_report", True)),
             )
 
             artifacts = sorted(str(path.resolve()) for path in Path(output_dir).glob("*.mp4"))

@@ -8,6 +8,7 @@ from backend.services.team_classification import (
     TeamConfig,
     classify_player_teams,
     compute_team_stats,
+    detect_team_colors,
     hex_to_bgr,
 )
 
@@ -97,3 +98,34 @@ def test_compute_team_stats_empty_labels_is_graceful() -> None:
     geometry = estimate_field_geometry(cloud, (1920, 1080))
     stats = compute_team_stats(np.empty((0, 4)), None, geometry, [], RED, BLUE, 60.0)
     assert "note" in stats
+
+
+def _bgr_dist(hex_a: str, hex_b: str) -> float:
+    a, b = np.asarray(hex_to_bgr(hex_a), float), np.asarray(hex_to_bgr(hex_b), float)
+    return float(np.linalg.norm(a - b))
+
+
+def test_detect_team_colors_finds_both_kits(tmp_path) -> None:
+    video = tmp_path / "kits.mp4"
+    positions = _write_two_team_video(video)
+
+    detected = detect_team_colors(str(video), positions)
+
+    assert detected is not None
+    hex_a, hex_b = detected
+    # Detected pair must be two genuinely different colors...
+    assert _bgr_dist(hex_a, hex_b) > 60.0
+    # ...and each configured kit must be close to one of them (order-free).
+    for kit in (RED.color_hex, BLUE.color_hex):
+        assert min(_bgr_dist(kit, hex_a), _bgr_dist(kit, hex_b)) < 90.0, (
+            f"kit {kit} not matched by detected {hex_a}/{hex_b}"
+        )
+
+
+def test_detect_team_colors_needs_enough_signal(tmp_path) -> None:
+    video = tmp_path / "kits2.mp4"
+    _write_two_team_video(video)
+    # Too few tracked positions -> refuse to guess.
+    assert detect_team_colors(str(video), None) is None
+    few = np.asarray([(0.5, 120.0, 150.0)] * 10, dtype=np.float64)
+    assert detect_team_colors(str(video), few) is None

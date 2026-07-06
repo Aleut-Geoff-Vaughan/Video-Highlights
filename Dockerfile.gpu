@@ -1,0 +1,58 @@
+# CUDA-accelerated image for NVIDIA hardware: gaming/workstation rigs (x86_64)
+# and NVIDIA DGX Spark / Grace-based systems (arm64). The base image and the
+# PyTorch wheel index are both overridable so one file serves every setup.
+#
+#   High-end x86 rig (RTX 30/40/50 series):
+#     docker build -f Dockerfile.gpu -t video-highlights:gpu .
+#
+#   NVIDIA DGX Spark (GB10, arm64) - build on the Spark itself or cross-build:
+#     docker buildx build --platform linux/arm64 \
+#       --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cu130 \
+#       -f Dockerfile.gpu -t video-highlights:gpu-arm64 .
+#
+# Run with the GPU exposed (NVIDIA Container Toolkit required):
+#     docker run --gpus all --ipc=host -p 8000:8000 \
+#       -v vh-data:/app/outputs video-highlights:gpu
+
+ARG CUDA_IMAGE=nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04
+FROM ${CUDA_IMAGE}
+
+# cu128 wheels ship for both x86_64 and aarch64 (SBSA) and cover Blackwell.
+# Use cu130 for the DGX Spark's CUDA 13 driver stack.
+ARG TORCH_INDEX=https://download.pytorch.org/whl/cu128
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    # "video" grants NVENC/NVDEC inside the container so ffmpeg can use
+    # h264_nvenc for GPU-encoded clip rendering, not just CUDA compute.
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-venv \
+    python3-pip \
+    ffmpeg \
+    libgl1 \
+    libglib2.0-0 \
+    libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Ubuntu 24.04 enforces PEP 668; a venv keeps pip installs clean.
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
+
+# CUDA torch must land before ultralytics so its torch dependency is already
+# satisfied and the CPU wheel never gets pulled in.
+COPY requirements.txt /app/requirements.txt
+RUN pip install --upgrade pip \
+    && pip install torch torchvision --index-url ${TORCH_INDEX} \
+    && pip install -r /app/requirements.txt
+
+COPY . /app
+RUN chmod +x /app/docker/start_all.sh
+
+EXPOSE 8000
+
+CMD ["/app/docker/start_all.sh"]

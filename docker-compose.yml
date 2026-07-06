@@ -45,15 +45,16 @@ services:
     volumes:
       - ./:/app
 
-
-
-
+  # GPU worker for NVIDIA rigs (x86_64) and DGX Spark (arm64). Requires the
+  # NVIDIA Container Toolkit on the host. `ipc: host` + a large shm stop
+  # PyTorch dataloader crashes; job-level knobs (imgsz, stride, model) come
+  # from the Create page or the job config.
 
 
   worker-gpu:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.gpu
     container_name: vh-worker-gpu
     command: python -m backend.worker
     environment:
@@ -68,9 +69,15 @@ services:
       VH_SKIP_USER_MANAGEMENT: "true"
       VH_BASE_TENANT_SLUG: sandbox
       VH_BASE_TENANT_NAME: Sandbox Tenant
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
     profiles: ["gpu"]
     depends_on:
       - api
     volumes:
       - ./:/app
     gpus: all
+    ipc: host
+    shm_size: "8gb"
+    ulimits:
+      memlock: -1
+      stack: 67108864
