@@ -53,7 +53,9 @@ class CameraPlannerConfig:
     # How far ahead of the ball (in seconds of ball velocity) to aim.
     lead_time_s: float = 0.35
     # Blend between the ball position and the nearby-player centroid.
-    action_blend: float = 0.25
+    # Kept LOW: the ball outranks the player cluster - it must never be
+    # dragged out of frame by a crowd of players.
+    action_blend: float = 0.12
     # Players within this fraction of the frame width around the ball count
     # as part of "the action".
     action_radius_frac: float = 0.22
@@ -63,11 +65,11 @@ class CameraPlannerConfig:
     # the whole video before rendering, so smoothing looks BOTH ways in time.
     # The camera glides and starts moving slightly before the play does -
     # the operator-like anticipation commercial systems are known for.
-    smooth_time_constant_s: float = 0.45
-    zoom_smooth_time_constant_s: float = 0.8
+    smooth_time_constant_s: float = 0.6
+    zoom_smooth_time_constant_s: float = 1.2
     # Motion limits for cinematic panning (crop-widths per second / s^2).
     max_pan_speed_crop_frac: float = 1.6
-    max_pan_accel_crop_frac: float = 3.0
+    max_pan_accel_crop_frac: float = 2.2
     # --- Goal-threat framing ---
     # When the ball is within this fraction of the field width from a goal
     # and attacking it, blend the aim toward the goal and pick a zoom that
@@ -83,7 +85,7 @@ class CameraPlannerConfig:
     # Operator deadband: within one state, aim changes smaller than this
     # (fraction of frame width / absolute zoom) are ignored - a human
     # operator holds steady instead of chasing millimeters.
-    deadband_frac: float = 0.015
+    deadband_frac: float = 0.02
     zoom_deadband: float = 0.05
     # Zoom levels relative to the configured base zoom.
     lost_zoom_scale: float = 0.8
@@ -419,6 +421,9 @@ def plan_camera(
             confidence = 0.92 if source == BALL_SOURCE_DETECTED else 0.6
             if source != BALL_SOURCE_DETECTED:
                 reason += " (interpolated across a short detection gap)"
+            # TOP PRIORITY: the visible ball never leaves the crop, no
+            # matter what the player-cluster blend or smoothing wants.
+            keeps = [(bx, by)]
             # Fast ball -> slightly wider shot so the play stays in frame.
             speed = math.hypot(vx, vy)
             speed_frac = min(1.0, speed / (cfg.fast_ball_speed_frame_widths_per_s * frame_w))

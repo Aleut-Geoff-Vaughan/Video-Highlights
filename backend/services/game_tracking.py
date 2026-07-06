@@ -573,10 +573,10 @@ class GameStateConfig:
     goal_run_gap_s: float = 1.5
     # Margin around the estimated goal mouth (posts): max of these two.
     goal_mouth_margin_px: float = 12.0
-    goal_mouth_margin_frac: float = 0.25
+    goal_mouth_margin_frac: float = 0.15
     # Goal events below this confidence are dropped (e.g. a ball that merely
     # vanishes near a goal as the recording ends).
-    min_goal_confidence: float = 0.65
+    min_goal_confidence: float = 0.7
     # --- Set pieces (corners, free kicks, goal kicks, kickoffs) ---
     # The ball must sit still (within the radius) at least this long.
     set_piece_min_stationary_s: float = 1.2
@@ -786,7 +786,10 @@ def detect_goal_events(
                 if not (mouth_y1 <= y_cross <= mouth_y2):
                     continue
                 t_cross = t0 + (t1 - t0) * alpha
-                confidence = 0.7
+                # A crossing alone is weak on real footage (geometry error,
+                # ball rolling past the post): it must be corroborated below
+                # to clear the confidence floor.
+                confidence = 0.55
                 evidence = {
                     "observed_in_goal_box": False,
                     "line_crossed_while_visible": True,
@@ -794,12 +797,22 @@ def detect_goal_events(
                     "goal_line_x": round(line_x, 1),
                 }
                 reason = f"ball observed crossing the {goal.side} goal line between the posts"
+                # Corroboration: ball STAYS behind the line for a while
+                # (sitting in the net) rather than rolling straight back.
+                behind_hi = int(np.searchsorted(times, t_cross + 1.0))
+                behind = xs[i + 1 : behind_hi]
+                if len(behind) >= 3 and (
+                    np.all(behind < line_x) if goal.side == "left" else np.all(behind > line_x)
+                ):
+                    confidence += 0.15
+                    evidence["stayed_behind_line"] = True
+                    reason += "; ball stayed behind the line"
                 if any(
                     gap_end > t_cross and gap_start < t_cross + 6.0
                     and (gap_end - gap_start) >= cfg.goal_disappear_confirm_s
                     for gap_start, gap_end in all_gaps
                 ):
-                    confidence += 0.1
+                    confidence += 0.15
                     reason += "; ball out of sight afterwards"
                 kickoff_t = _reappears_near_center(t_cross + 0.5)
                 if kickoff_t is not None:
