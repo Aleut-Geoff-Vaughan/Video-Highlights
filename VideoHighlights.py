@@ -88,6 +88,7 @@ from backend.services.team_classification import (
     classify_player_teams,
     compute_team_stats,
     detect_team_colors,
+    hex_to_bgr,
 )
 from backend.services.match_report import generate_match_report
 from backend.services.broadcast import (
@@ -2173,13 +2174,25 @@ def _process_video_highlights_impl(
                 )
 
         team_stats: Dict[str, object] = {}
-        if auto_detect_team_colors and not (team_left_color and team_right_color):
+        if auto_detect_team_colors:
             emit_progress(progress_callback, "game_analysis", 0.845, "Auto-detecting jersey colors")
             try:
                 detected = detect_team_colors(processing_video, player_positions)
                 if detected:
-                    team_left_color, team_right_color = detected
+                    det_a, det_b = detected
+                    if team_left_color and team_right_color:
+                        # Detected colors come back in population order; keep
+                        # each team name attached to the kit it was picked for
+                        # by giving team A the detected color nearest its pick.
+                        pick_a = np.asarray(hex_to_bgr(team_left_color), dtype=float)
+                        if np.linalg.norm(np.asarray(hex_to_bgr(det_a), dtype=float) - pick_a) > np.linalg.norm(
+                            np.asarray(hex_to_bgr(det_b), dtype=float) - pick_a
+                        ):
+                            det_a, det_b = det_b, det_a
+                    team_left_color, team_right_color = det_a, det_b
                     print(f"[team] Auto-detected jersey colors: {team_left_color} vs {team_right_color}")
+                elif team_left_color and team_right_color:
+                    print("[warn] Could not auto-detect jersey colors; keeping the configured colors")
                 else:
                     print("[warn] Could not auto-detect jersey colors (not enough distinct kit pixels)")
             except Exception as color_exc:
