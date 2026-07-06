@@ -62,8 +62,13 @@ def generate_match_report(summary: Dict[str, object]) -> str:
         from openai import OpenAI
 
         base_url = settings.llm_base_url
-        if provider == "ollama" and not base_url:
-            base_url = "http://localhost:11434/v1"
+        if provider == "ollama":
+            # Ollama serves the OpenAI-compatible API under /v1; accept the
+            # base URL with or without the suffix (the agent settings use it
+            # without).
+            base_url = (base_url or "http://localhost:11434").rstrip("/")
+            if not base_url.endswith("/v1"):
+                base_url = f"{base_url}/v1"
         client = OpenAI(
             api_key=settings.llm_api_key or settings.openai_api_key or "ollama",
             base_url=base_url if provider != "openai" else None,

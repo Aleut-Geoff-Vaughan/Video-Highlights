@@ -52,6 +52,12 @@ def test_llm_report_uses_ollama_endpoint_and_model(monkeypatch) -> None:
     prompt = calls["create"]["messages"][0]["content"]
     assert "goal_events" in prompt and "487" in prompt
 
+    # A base URL configured without /v1 (as the agent settings use it) is
+    # normalized to Ollama's OpenAI-compatible endpoint.
+    monkeypatch.setattr(settings, "llm_base_url", "http://192.168.1.50:11434")
+    generate_match_report(SUMMARY)
+    assert calls["client"]["base_url"] == "http://192.168.1.50:11434/v1"
+
 
 def test_llm_failure_falls_back_to_template(monkeypatch) -> None:
     import openai
