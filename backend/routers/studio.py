@@ -73,6 +73,8 @@ def _run_summary(path: Path) -> Dict[str, object]:
         "goal_events": states.get("goal_events", []),
         "card_events": states.get("card_events", []),
         "set_piece_events": states.get("set_piece_events", []),
+        "trim_offset_seconds": states.get("trim_offset_seconds", 0.0),
+        "team_stats": _read_json(path / "analysis_team_stats.json"),
         "videos": videos,
         "card_crops": crops,
         "bookmarks": manifest.get("bookmarks", []),
