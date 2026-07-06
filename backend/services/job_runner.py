@@ -707,6 +707,11 @@ class JobRunner:
                 goal_box_right=dict(config.get("goal_box_right") or {}) if isinstance(config.get("goal_box_right"), dict) else None,
                 detect_cards=bool(config.get("detect_cards", True)),
                 broadcast_reel=bool(config.get("broadcast_reel", True)),
+                scorebug=bool(config.get("scorebug", True)),
+                team_left=str(config.get("team_left") or "HOME"),
+                team_right=str(config.get("team_right") or "AWAY"),
+                team_left_color=str(config.get("team_left_color")) if config.get("team_left_color") else None,
+                team_right_color=str(config.get("team_right_color")) if config.get("team_right_color") else None,
             )
 
             artifacts = sorted(str(path.resolve()) for path in Path(output_dir).glob("*.mp4"))

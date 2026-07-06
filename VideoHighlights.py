@@ -83,6 +83,11 @@ from backend.services.game_tracking import (
     summarize_states,
 )
 from backend.services.card_detection import detect_card_events, stopped_play_windows
+from backend.services.team_classification import (
+    TeamConfig,
+    classify_player_teams,
+    compute_team_stats,
+)
 from backend.services.broadcast import (
     build_broadcast_reel,
     compute_audio_envelope,
@@ -1735,6 +1740,8 @@ def process_video_highlights(
     scorebug: bool = True,
     team_left: str = "HOME",
     team_right: str = "AWAY",
+    team_left_color: Optional[str] = None,
+    team_right_color: Optional[str] = None,
 ) -> bool:
     """Public pipeline entry point used by the CLI, GUI, and API worker.
 
@@ -1783,6 +1790,8 @@ def process_video_highlights(
             scorebug=scorebug,
             team_left=team_left,
             team_right=team_right,
+            team_left_color=team_left_color,
+            team_right_color=team_right_color,
         )
     finally:
         teardown_run_logging(run_log_handler)
@@ -1858,6 +1867,8 @@ def _process_video_highlights_impl(
     scorebug: bool = True,
     team_left: str = "HOME",
     team_right: str = "AWAY",
+    team_left_color: Optional[str] = None,
+    team_right_color: Optional[str] = None,
 ) -> bool:
     """
     Core video highlights processing function.
@@ -2153,6 +2164,24 @@ def _process_video_highlights_impl(
                     f"{format_time(card.t + trim_offset)} (confidence {card.confidence:.2f})"
                 )
 
+        team_stats: Dict[str, object] = {}
+        if team_left_color and team_right_color:
+            emit_progress(progress_callback, "game_analysis", 0.846, "Classifying teams by uniform color")
+            try:
+                cfg_a = TeamConfig(name=team_left, color_hex=team_left_color)
+                cfg_b = TeamConfig(name=team_right, color_hex=team_right_color)
+                labeled = classify_player_teams(
+                    processing_video, player_positions, cfg_a, cfg_b
+                )
+                team_stats = compute_team_stats(
+                    labeled, ball_track, field_geometry, goal_events,
+                    cfg_a, cfg_b, analysis_end_s,
+                )
+                poss = team_stats.get("possession_pct") or {}
+                print(f"[team] possession: {poss} | goals: {team_stats.get('goals')}")
+            except Exception as team_exc:
+                print(f"[warn] Team classification failed: {team_exc}")
+
         state_summary = summarize_states(game_segments)
         ball_coverage = ball_track.coverage_fraction(0.0, analysis_end_s)
         print(
@@ -2248,9 +2277,23 @@ def _process_video_highlights_impl(
             **{key: float(value) for key, value in ball_track.stats.items()},
             "coverage_fraction": round(ball_coverage, 4),
         }
+        goal_teams = {
+            round(float(row.get("t", -1.0)), 3): row.get("team")
+            for row in (team_stats.get("goal_attribution") or [])
+        }
         original_goal_events = [
-            {**goal.to_dict(), "t": round(goal.t + trim_offset, 3)} for goal in goal_events
+            {
+                **goal.to_dict(),
+                "t": round(goal.t + trim_offset, 3),
+                "team": goal_teams.get(round(goal.t, 3)),
+            }
+            for goal in goal_events
         ]
+        if team_stats:
+            team_stats_path = os.path.join(output_dir, "analysis_team_stats.json")
+            with open(team_stats_path, "w", encoding="utf-8") as handle:
+                json.dump(team_stats, handle, indent=2)
+            print(f"[analysis] Team stats: {team_stats_path}")
         original_set_pieces = [
             {
                 **sp.to_dict(),
@@ -2712,6 +2755,8 @@ def main():
     ap.add_argument("--team-left", type=str, default="HOME", help="Name of the team defending the LEFT goal (scorebug)")
     ap.add_argument("--team-right", type=str, default="AWAY", help="Name of the team defending the RIGHT goal (scorebug)")
     ap.add_argument("--no-scorebug", action="store_true", help="Disable the score + clock overlay on follow_ball renders")
+    ap.add_argument("--team-left-color", type=str, default=None, help="Jersey hex color of the team defending the LEFT goal at kickoff (e.g. #d32f2f) - enables team stats and goal attribution")
+    ap.add_argument("--team-right-color", type=str, default=None, help="Jersey hex color of the team defending the RIGHT goal at kickoff")
     ap.add_argument("--fast", action="store_true", help="~2x faster tracking: analyze every 2nd frame at reduced inference size (slightly lower detection fidelity)")
     args = ap.parse_args()
 
@@ -2846,6 +2891,8 @@ def main():
         scorebug=not args.no_scorebug,
         team_left=args.team_left,
         team_right=args.team_right,
+        team_left_color=args.team_left_color,
+        team_right_color=args.team_right_color,
         vid_stride=2 if args.fast else 1,
         inference_imgsz=736 if args.fast else 960,
     )

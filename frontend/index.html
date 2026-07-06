@@ -141,7 +141,8 @@ async function renderRun(id){
           <div class="metric"><div class="v">${(r.card_events||[]).length}</div><div class="l">Cards</div></div>
           <div class="metric"><div class="v">${(r.stats?.bookmark_count)??0}</div><div class="l">Bookmarks</div></div>
         </div>
-        ${panelList('Goals',(r.goal_events||[]).map(g=>`${fmt(g.t)} - ${esc(g.side)} goal (${(+g.confidence).toFixed(2)})<br><small style="color:var(--dim)">${esc(g.reason)}</small>`))}
+        ${teamPanel(r.team_stats)}
+        ${panelList('Goals',(r.goal_events||[]).map(g=>`${fmt(g.t)}${g.team?' - <b>'+esc(g.team)+'</b>':''} - ${esc(g.side)} goal (${(+g.confidence).toFixed(2)})<br><small style="color:var(--dim)">${esc(g.reason)}</small>`))}
         ${panelList('Set pieces',(r.set_piece_events||[]).map(s=>`${fmt(s.t_kick)} - ${esc(s.kind)}${s.side?' ('+esc(s.side)+')':''}`))}
         ${panelList('Cards',(r.card_events||[]).map(c=>`${fmt(c.t)} - ${esc(c.kind)} (${(+c.confidence).toFixed(2)})`))}
         <div class="panel"><h3>Game states (s)</h3><table><tbody>${Object.entries(r.state_summary_s||{}).map(([k,val])=>`<tr><td>${esc(k)}</td><td>${val}</td></tr>`).join('')}</tbody></table></div>
@@ -150,6 +151,21 @@ async function renderRun(id){
     </div>`;
   window._views=Object.fromEntries(views.map(([_,key,file])=>[key,file]));
   if(first)setView(first);
+}
+function teamPanel(ts){
+  if(!ts||!ts.teams||!ts.teams.length)return '';
+  const [a,b]=ts.teams, pa=ts.possession_pct?.[a.team]??0, pb=ts.possession_pct?.[b.team]??0;
+  const ga=ts.goals?.[a.team]??0, gb=ts.goals?.[b.team]??0;
+  return `<div class="panel"><h3>Teams</h3>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <span><i style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${esc(a.color)}"></i> <b>${esc(a.team)}</b></span>
+      <span style="font-size:20px;font-weight:700">${ga} - ${gb}</span>
+      <span><b>${esc(b.team)}</b> <i style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${esc(b.color)}"></i></span>
+    </div>
+    <div style="color:var(--dim);font-size:12px;margin-bottom:4px">Possession ${pa}% / ${pb}%</div>
+    <div class="bar" style="height:10px"><i style="width:${pa}%;background:${esc(a.color)}"></i></div>
+    ${ts.defending_side&&Object.keys(ts.defending_side).length?`<div class="note">1st half: ${Object.entries(ts.defending_side).map(([t,s])=>`${esc(t)} defends ${s}`).join(', ')}</div>`:''}
+  </div>`;
 }
 function panelList(title,items){return items.length?`<div class="panel"><h3>${title}</h3>${items.map(i=>`<div style="margin-bottom:8px">${i}</div>`).join('')}</div>`:''}
 function setView(key){
@@ -161,29 +177,60 @@ function seek(t){const vid=$('#vid');vid.currentTime=t;vid.play()}
 
 function renderCreate(){
   $('#main').innerHTML=`
-  <h1>Create</h1><div class="sub">Upload a match recording and start processing</div>
+  <h1>Create</h1><div class="sub">Upload a match recording and configure the run</div>
   <form onsubmit="return createRun(event)">
-    <div class="row">
-      <div><label>Match name</label><input type="text" id="c_name" value="Match" required></div>
-      <div><label>Date</label><input type="date" id="c_date"></div>
+    <div class="panel"><h3>Match</h3>
+      <div class="row">
+        <div><label>Match name</label><input type="text" id="c_name" value="Match" required></div>
+        <div><label>Date</label><input type="date" id="c_date"></div>
+      </div>
+      <label>Match video</label><input type="file" id="c_file" accept="video/*" required>
     </div>
-    <div class="row">
-      <div><label>Team defending LEFT goal</label><input type="text" id="c_left" value="HOME"></div>
-      <div><label>Team defending RIGHT goal</label><input type="text" id="c_right" value="AWAY"></div>
+    <div class="panel"><h3>Teams &amp; jersey colors</h3>
+      <div class="row">
+        <div><label>Team defending LEFT goal at kickoff</label><input type="text" id="c_left" value="HOME">
+          <label>Jersey color</label><input type="color" id="c_leftcol" value="#d32f2f" style="width:100%;height:38px;background:var(--panel2);border:1px solid var(--line);border-radius:8px"></div>
+        <div><label>Team defending RIGHT goal at kickoff</label><input type="text" id="c_right" value="AWAY">
+          <label>Jersey color</label><input type="color" id="c_rightcol" value="#1976d2" style="width:100%;height:38px;background:var(--panel2);border:1px solid var(--line);border-radius:8px"></div>
+      </div>
+      <div class="checks"><label><input type="checkbox" id="c_teams" checked> Team stats &amp; goal attribution by jersey color</label></div>
+      <div class="note">Pick the dominant jersey color of each team - possession, territory, and per-team goals depend on it.</div>
     </div>
-    <label>Match video</label><input type="file" id="c_file" accept="video/*" required>
-    <div class="row3">
-      <div><label>Camera</label><select id="c_cam"><option value="follow_ball" selected>Game camera (follow ball)</option><option value="follow_action">Follow player + action</option><option value="follow_player">Follow player</option><option value="wide">Wide (no crop)</option></select></div>
-      <div><label>Zoom</label><input type="number" id="c_zoom" value="1.8" step="0.1" min="1" max="3"></div>
-      <div><label>Speed</label><select id="c_speed"><option value="quality" selected>Best quality</option><option value="fast">Fast (~2x)</option></select></div>
+    <div class="panel"><h3>Camera</h3>
+      <div class="row3">
+        <div><label>Mode</label><select id="c_cam"><option value="follow_ball" selected>Game camera (follow ball)</option><option value="follow_action">Follow player + action</option><option value="follow_player">Follow player</option><option value="wide">Wide (no crop)</option></select></div>
+        <div><label>Zoom</label><input type="number" id="c_zoom" value="1.8" step="0.1" min="1" max="3"></div>
+        <div><label>Speed</label><select id="c_speed"><option value="quality" selected>Best quality</option><option value="fast">Fast (~2x)</option></select></div>
+      </div>
+      <div class="checks">
+        <label><input type="checkbox" id="c_full" checked> Full game-camera movie</label>
+        <label><input type="checkbox" id="c_bug" checked> Scorebug overlay</label>
+      </div>
     </div>
-    <div class="checks">
-      <label><input type="checkbox" id="c_full" checked> Full game-camera movie</label>
-      <label><input type="checkbox" id="c_reel" checked> Broadcast reel</label>
-      <label><input type="checkbox" id="c_cards" checked> Card detection</label>
-      <label><input type="checkbox" id="c_debug" checked> Debug video (camera decisions)</label>
-      <label><input type="checkbox" id="c_bug" checked> Scorebug overlay</label>
-      <label><input type="checkbox" id="c_train"> Training data dump</label>
+    <div class="panel"><h3>Highlights &amp; detection</h3>
+      <div class="row3">
+        <div><label>Seconds before event</label><input type="number" id="c_pre" value="2" step="0.5" min="0"></div>
+        <div><label>Seconds after event</label><input type="number" id="c_post" value="6" step="0.5" min="1"></div>
+        <div><label>Min clip length (s)</label><input type="number" id="c_minclip" value="4" step="0.5" min="1"></div>
+      </div>
+      <div class="row">
+        <div><label>Motion sensitivity (lower = more clips)</label><input type="number" id="c_speedsens" value="2.0" step="0.1" min="0.5" max="5"></div>
+        <div><label>Audio sensitivity (lower = more clips)</label><input type="number" id="c_audiosens" value="2.0" step="0.1" min="0.5" max="5"></div>
+      </div>
+      <div class="checks">
+        <label><input type="checkbox" id="c_reel" checked> Broadcast reel (cold open, replays)</label>
+        <label><input type="checkbox" id="c_cards" checked> Yellow/red card detection</label>
+      </div>
+    </div>
+    <div class="panel"><h3>Trim &amp; diagnostics</h3>
+      <div class="row">
+        <div><label>Trim start (MM:SS, optional)</label><input type="text" id="c_tstart" placeholder=""></div>
+        <div><label>Trim end (MM:SS, optional)</label><input type="text" id="c_tend" placeholder=""></div>
+      </div>
+      <div class="checks">
+        <label><input type="checkbox" id="c_debug" checked> Debug video (camera decisions + why)</label>
+        <label><input type="checkbox" id="c_train"> Training data dump</label>
+      </div>
     </div>
     <button class="btn" id="c_go">Upload &amp; Process</button>
     <div id="c_prog" style="margin-top:14px"></div>
@@ -213,8 +260,14 @@ async function createRun(ev){
       detect_cards:$('#c_cards').checked,debug_video:$('#c_debug').checked,
       scorebug:$('#c_bug').checked,dump_training_data:$('#c_train').checked,
       team_left:$('#c_left').value,team_right:$('#c_right').value,
+      pre_seconds:+$('#c_pre').value,post_seconds:+$('#c_post').value,
+      min_clip_duration:+$('#c_minclip').value,
+      speed_sensitivity:+$('#c_speedsens').value,audio_sensitivity:+$('#c_audiosens').value,
       vid_stride:$('#c_speed').value==='fast'?2:1,
       inference_imgsz:$('#c_speed').value==='fast'?736:960};
+    if($('#c_teams').checked){config.team_left_color=$('#c_leftcol').value;config.team_right_color=$('#c_rightcol').value;}
+    if($('#c_tstart').value.trim())config.trim_start=$('#c_tstart').value.trim();
+    if($('#c_tend').value.trim())config.trim_end=$('#c_tend').value.trim();
     const job=await j(`${API}/matches/${m.match_id}/jobs`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({config})});
     prog.innerHTML=`✅ Job <b>${esc(job.job_id)}</b> queued. <a href="#jobs">Track progress →</a>`;
   }catch(e){prog.innerHTML=`❌ ${esc(e.message)}`}
