@@ -173,7 +173,12 @@ function setView(key){
   const id=location.hash.split('/')[1];
   $('#vid').src=`${API}/studio/runs/${id}/file/${window._views[key]}`;
 }
-function seek(t){const vid=$('#vid');vid.currentTime=t;vid.play()}
+function seek(t){
+  const vid=$('#vid');
+  const offset=+(RUN?.trim_offset_seconds||0);
+  vid.currentTime=Math.max(0,t-offset-4);  // start 4s before the event
+  vid.play();
+}
 
 function renderCreate(){
   $('#main').innerHTML=`

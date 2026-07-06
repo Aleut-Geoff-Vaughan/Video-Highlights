@@ -565,8 +565,11 @@ class GameStateConfig:
     min_shot_speed_frame_widths_per_s: float = 0.25
     # Minimum x-velocity (px/s) that counts as the ball entering a goal.
     goal_entry_speed_px_s: float = 20.0
-    # Goal candidates on the same side within this window merge into one.
-    goal_merge_window_s: float = 6.0
+    # Goal candidates on the same side within this window merge into one
+    # goal. Generous on purpose: the ball sitting in the net / being picked
+    # up produces late secondary sightings of the SAME goal (two real goals
+    # on one side within 25s would need a restart + full attack - rare).
+    goal_merge_window_s: float = 25.0
     # How far ahead a vanishing ball's path is extrapolated to the goal line.
     goal_extrapolation_s: float = 0.8
     # Consecutive in-goal sightings further apart than this start a new run.
@@ -688,8 +691,11 @@ def detect_goal_events(
                     merged.get("line_crossed_while_visible")
                 )
                 if confidence > existing.confidence:
-                    existing.t = t
                     existing.reason = reason
+                # The goal happened at the EARLIEST signal (the crossing) -
+                # later corroboration (ball seen in the net, kickoff) raises
+                # confidence but must never move the timestamp later.
+                existing.t = min(existing.t, t)
                 existing.confidence = min(
                     0.98, max(existing.confidence, confidence) + (0.05 if corroborated else 0.0)
                 )
