@@ -107,3 +107,8 @@ This file tracks concrete implementation progress against the documented V1 arch
 4. Add CI stages for lint/type checks plus smoke tests (`test_api_smoke.py`, `test_api_auth_queue.py`).
 5. Add OpenAPI contract snapshot checks to detect breaking API changes automatically.
 6. Add tenant-aware usage quotas and billing guardrails.
+7. Compute the baseline 15-stat per-team catalog (`FR-STATS-01`) from existing event/tracking outputs, with per-stat availability flags.
+8. Start the production frontend foundation (`FR-UI-01` to `FR-UI-04`): componentized app with auth UX, responsive layout, and guided upload replacing the single-file Studio page.
+9. Add completion email notifications (`FR-NOTIFY-01`) on job success/failure.
+10. Add roster template import and manual highlight assignment (`FR-ROSTER-01`, `FR-ROSTER-04`) as the precursor to jersey-number routing.
+11. Add upload validation for size limits and 30-minute minimum length (`FR-INGEST-05` to `FR-INGEST-07`).
