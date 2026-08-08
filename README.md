@@ -155,6 +155,42 @@ python -m uvicorn backend.main:app --port 8000
 # open http://localhost:8000
 ```
 
+The web UI is a componentized ES-module app served straight from `frontend/`
+(no build step): `frontend/js/views/*` hold the views, `frontend/js/api.js`
+the API client, `frontend/css/app.css` the responsive light/dark styles.
+It signs in against the API (token or developer mode — no hardcoded tenant),
+and provides:
+
+1. **Matches** — per-match dashboard: the baseline 15-stat team catalog with
+   per-stat availability flags and evidence drill-down, roster management
+   (single entries or CSV template import via `GET /v1/matches/roster-template.csv`),
+   and manual highlight-to-player assignment.
+2. **Create** — guided upload wizard: drag-and-drop with progress, pre-flight
+   validation against `GET /v1/matches/upload-policy` (size caps, formats,
+   minimum length), resolution warnings, and an optional notify email.
+3. **Jobs** — queue with stage progress, elapsed-vs-SLA turnaround messaging,
+   live logs, and completion-notification delivery state.
+4. **Runs** — the film review workspace (video views, bookmarks, team panel,
+   AI match report).
+
+Upload/notification behavior is configured by environment:
+
+```bash
+VH_UPLOAD_MAX_GB=3                  # standard upload cap
+VH_UPLOAD_EXTENDED_MAX_GB=8         # cap for tenants with the extended_uploads entitlement
+VH_UPLOAD_MIN_DURATION_SECONDS=0    # set 1800 to enforce the 30-minute match minimum
+VH_PROCESSING_SLA_HOURS_MIN=4       # turnaround target shown in the UI
+VH_PROCESSING_SLA_HOURS_MAX=6
+VH_NOTIFY_BACKEND=console           # console | smtp | disabled
+VH_SMTP_HOST=... VH_SMTP_PORT=587 VH_SMTP_USERNAME=... VH_SMTP_PASSWORD=... VH_SMTP_FROM=...
+```
+
+A tenant gets the extended upload cap when its metadata contains
+`{"entitlements": {"extended_uploads": true}}`. Completion emails go to the
+job config's `notify_email` (set by the Create wizard) or the match metadata's
+`notify_email`, and every attempt is recorded and visible via
+`GET /v1/jobs/{job_id}/notifications`.
+
 For large match files, including 10GB+ recordings, use the portal's **Local File Path (10GB+)** video source. Use **Browse** or paste a path to register a file that already exists on the API/worker machine and process it in place. The portal preflights the path through the API worker and reports file size, basic media metadata when `ffprobe` is available, and clear messages for missing, zero-byte, cloud-placeholder, or still-copying files. Browser upload is intended only for smaller files.
 
 Leave **Limit to test window** enabled for the first smoke test. The default window processes only the first 2 minutes, which is much faster and safer than starting with a full 10GB match.

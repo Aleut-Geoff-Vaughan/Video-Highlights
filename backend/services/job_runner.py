@@ -16,6 +16,7 @@ from ..database import session_scope
 from ..models import Event, Match, ProcessingJob, TrainingFeedbackBatch, TrainingRun
 from .gpu_status import get_gpu_status
 from .job_logging import append_job_log
+from .notifications import notify_job_terminal_state
 from .yolo_training import train_ultralytics_yolo
 from ..utils import ensure_dir
 
@@ -857,6 +858,7 @@ class JobRunner:
 
                 job.updated_at = _utcnow()
                 job.completed_at = _utcnow()
+                notify_job_terminal_state(session, job)
 
         except Exception as exc:
             error = f"{exc}\n{traceback.format_exc()}"
@@ -870,6 +872,7 @@ class JobRunner:
                 job.error_message = error
                 job.updated_at = _utcnow()
                 job.completed_at = _utcnow()
+                notify_job_terminal_state(session, job)
                 append_job_log(
                     session=session,
                     job_id=job.id,

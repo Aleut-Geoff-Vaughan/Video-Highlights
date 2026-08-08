@@ -10,12 +10,21 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from sqlmodel import Session, select
 
 from ..auth import UserContext, require_roles
+from ..config import settings
 from ..database import get_session
-from ..models import Match
-from ..schemas import MatchCreate, MatchLocalAssetRegister, MatchPatch, MatchRead
+from ..models import Match, Tenant
+from ..schemas import (
+    MatchCreate,
+    MatchLocalAssetRegister,
+    MatchPatch,
+    MatchRead,
+    MatchStatsRead,
+    UploadPolicyRead,
+)
 from ..serializers import match_to_read
 from ..services.ffmpeg_tools import ffprobe_exe
 from ..services.media_timeline import build_media_timeline
+from ..services.stat_catalog import compute_match_stat_catalog
 from ..services.storage import get_storage_backend
 from ..tenant import TenantContext, get_tenant_context
 from ..utils import decode_cursor, encode_cursor, utcnow
@@ -23,6 +32,26 @@ from ..utils import decode_cursor, encode_cursor, utcnow
 router = APIRouter(prefix="/matches", tags=["matches"])
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".m4v"}
+
+
+def _gb_to_bytes(value_gb: float) -> int:
+    return int(value_gb * 1024 * 1024 * 1024)
+
+
+def _tenant_has_extended_uploads(session: Session, tenant_id: str | None) -> bool:
+    if not tenant_id:
+        return False
+    tenant = session.get(Tenant, tenant_id)
+    if not tenant:
+        return False
+    entitlements = dict((tenant.metadata_json or {}).get("entitlements", {}) or {})
+    return bool(entitlements.get("extended_uploads", False))
+
+
+def _resolve_upload_cap_bytes(session: Session, tenant_id: str | None) -> tuple[int, bool]:
+    extended = _tenant_has_extended_uploads(session, tenant_id)
+    cap_gb = settings.upload_extended_max_gb if extended else settings.upload_max_gb
+    return _gb_to_bytes(cap_gb), extended
 
 
 def _run_ffprobe(path: str) -> Dict[str, Any]:
@@ -202,6 +231,25 @@ def list_matches(
     return {"items": [item.model_dump() for item in items], "next_cursor": next_cursor}
 
 
+@router.get("/upload-policy", response_model=UploadPolicyRead)
+def get_upload_policy(
+    session: Session = Depends(get_session),
+    _: UserContext = Depends(require_roles("admin", "analyst", "coach", "parent", "system", "tenant_admin")),
+    tenant: TenantContext = Depends(get_tenant_context),
+) -> UploadPolicyRead:
+    cap_bytes, extended = _resolve_upload_cap_bytes(session, tenant.tenant_id)
+    return UploadPolicyRead(
+        max_upload_bytes=cap_bytes,
+        max_upload_gb=settings.upload_extended_max_gb if extended else settings.upload_max_gb,
+        extended_max_upload_bytes=_gb_to_bytes(settings.upload_extended_max_gb),
+        extended_max_upload_gb=settings.upload_extended_max_gb,
+        extended_upload_enabled=extended,
+        min_duration_seconds=settings.upload_min_duration_seconds,
+        allowed_extensions=sorted(VIDEO_EXTENSIONS),
+        processing_sla_hours=[settings.processing_sla_hours_min, settings.processing_sla_hours_max],
+    )
+
+
 @router.post("/assets/inspect-local", response_model=Dict[str, Any])
 def inspect_local_match_asset(
     payload: MatchLocalAssetRegister,
@@ -256,6 +304,20 @@ def get_match_timeline(
     return timeline
 
 
+@router.get("/{match_id}/stats", response_model=MatchStatsRead)
+def get_match_stats(
+    match_id: str,
+    job_id: str | None = Query(default=None),
+    session: Session = Depends(get_session),
+    _: UserContext = Depends(require_roles("admin", "analyst", "coach", "parent", "system", "tenant_admin")),
+    tenant: TenantContext = Depends(get_tenant_context),
+) -> MatchStatsRead:
+    match = session.get(Match, match_id)
+    if not match or match.tenant_id != tenant.tenant_id:
+        raise HTTPException(status_code=404, detail=f"Match not found: {match_id}")
+    return compute_match_stat_catalog(session, match, tenant.tenant_id, job_id=job_id)
+
+
 @router.patch("/{match_id}", response_model=MatchRead)
 def update_match(
     match_id: str,
@@ -301,28 +363,67 @@ def upload_match_asset(
         raise HTTPException(status_code=404, detail=f"Match not found: {match_id}")
 
     safe_name = file.filename or "upload.bin"
+    extension = os.path.splitext(safe_name)[1].lower()
+    if extension not in VIDEO_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported video format '{extension or 'none'}'. Upload one of: {', '.join(sorted(VIDEO_EXTENSIONS))}",
+        )
+
+    cap_bytes, extended = _resolve_upload_cap_bytes(session, tenant.tenant_id)
+
+    def _discard_stored(stored_result) -> None:
+        if stored_result.backend == "local" and stored_result.path and os.path.exists(stored_result.path):
+            try:
+                os.remove(stored_result.path)
+            except OSError:
+                pass
+
     storage = get_storage_backend()
     stored = storage.save_file(file.file, key_prefix=match_id, filename=safe_name)
     file.file.close()
     if int(stored.size_bytes or 0) <= 0:
-        if stored.backend == "local" and stored.path and os.path.exists(stored.path):
-            try:
-                os.remove(stored.path)
-            except OSError:
-                pass
+        _discard_stored(stored)
         raise HTTPException(status_code=400, detail="Uploaded video file is empty. Choose a non-empty MP4/MOV/MKV/AVI file.")
 
+    if int(stored.size_bytes or 0) > cap_bytes:
+        _discard_stored(stored)
+        cap_gb = settings.upload_extended_max_gb if extended else settings.upload_max_gb
+        upgrade_hint = "" if extended else " Larger matches are available as a paid add-on (extended uploads)."
+        raise HTTPException(
+            status_code=413,
+            detail=f"Video is larger than the {cap_gb:g} GB upload limit for this account.{upgrade_hint}",
+        )
+
+    probe: Dict[str, Any] = {}
+    if stored.backend == "local" and stored.path and os.path.exists(stored.path):
+        probe = _run_ffprobe(stored.path)
+        min_duration = settings.upload_min_duration_seconds
+        duration = probe.get("duration_seconds") if probe.get("ok") else None
+        if min_duration > 0 and duration is not None and float(duration) < min_duration:
+            _discard_stored(stored)
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Video is {float(duration) / 60.0:.1f} minutes long; matches must be at least "
+                    f"{min_duration / 60.0:.0f} minutes to analyze."
+                ),
+            )
+
     assets = list((match.metadata_json or {}).get("assets", []))
-    assets.append(
-        {
-            "asset_id": stored.object_id,
-            "filename": safe_name,
-            "path": stored.path,
-            "size_bytes": stored.size_bytes,
-            "storage_backend": stored.backend,
-            "uploaded_at": utcnow().isoformat(),
-        }
-    )
+    asset_entry: Dict[str, Any] = {
+        "asset_id": stored.object_id,
+        "filename": safe_name,
+        "path": stored.path,
+        "size_bytes": stored.size_bytes,
+        "storage_backend": stored.backend,
+        "uploaded_at": utcnow().isoformat(),
+    }
+    if probe.get("ok"):
+        asset_entry["duration_seconds"] = probe.get("duration_seconds")
+        asset_entry["width"] = probe.get("width")
+        asset_entry["height"] = probe.get("height")
+    assets.append(asset_entry)
     metadata = dict(match.metadata_json or {})
     metadata["assets"] = assets
     match.metadata_json = metadata
@@ -350,6 +451,9 @@ def upload_match_asset(
         "path": stored.path,
         "size_bytes": stored.size_bytes,
         "storage_backend": stored.backend,
+        "duration_seconds": asset_entry.get("duration_seconds"),
+        "width": asset_entry.get("width"),
+        "height": asset_entry.get("height"),
     }
 
 

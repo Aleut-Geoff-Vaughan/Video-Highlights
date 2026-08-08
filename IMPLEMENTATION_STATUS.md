@@ -89,13 +89,24 @@ This file tracks concrete implementation progress against the documented V1 arch
 16. Rebuilt `app.py` into a SaaS-style processing portal with dashboards, announcements, game library, rerun flows, and operations console.
 17. Polished the Streamlit portal visual system with a cleaner operations-studio header, flatter cards, tighter metrics, safer HTML escaping, and follow-cam mode visibility across run summaries.
 
+## Customer FAQ batch (stats, roster, uploads, notifications, UI)
+
+1. Added baseline 15-stat per-team catalog service (`backend/services/stat_catalog.py`) with per-stat availability flags, attribution buckets (home/away/unattributed), shot dedup, possession from `analysis_team_stats.json`, and evidence event ids (`FR-STATS-01/02/04`).
+2. Added `GET /v1/matches/{match_id}/stats` (optionally scoped by `job_id`).
+3. Added roster management (`backend/routers/roster.py`): CRUD, CSV template download, alias-tolerant CSV import with per-row errors, and per-side jersey uniqueness (`FR-ROSTER-01/06`).
+4. Added manual highlight assignment `POST /v1/matches/{match_id}/events/{event_id}/assign` plus an `assigned` filter on the events list; deleting a roster entry unassigns its events (`FR-ROSTER-04`).
+5. Added upload validation: extension checks, 3 GB standard / 8 GB entitlement-gated caps, optional minimum-duration gate, ffprobe metadata capture, and `GET /v1/matches/upload-policy` for client pre-flight (`FR-INGEST-05..07`).
+6. Added completion notifications (`backend/services/notifications.py`): console/smtp/disabled backends, `notification_logs` table, job-runner terminal-state hooks, and `GET /v1/jobs/{job_id}/notifications` (`FR-NOTIFY-01`).
+7. Rebuilt the web UI as a componentized ES-module app under `frontend/` (still no build step): sign-in (token or dev) with no hardcoded tenant, responsive layout with mobile nav, match dashboard (stat catalog, roster import, highlight assignment), guided 3-step upload wizard with policy pre-flight and progress, jobs view with SLA turnaround messaging and notification state, and the ported film-review workspace (`FR-UI-01..04`, `FR-UI-05/06` first pass, `FR-UI-12`).
+8. Added test coverage: `tests/test_match_stats.py`, `tests/test_roster_and_assignment.py`, `tests/test_upload_validation.py`, `tests/test_notifications.py`; browser smoke test of the new UI ran green under Playwright/Chromium.
+
 ## Validated
 
 1. `python -m compileall app.py VideoHighlights.py backend` succeeds.
 2. `python test_api_smoke.py` passes end-to-end for core API flow.
 3. `python test_api_auth_queue.py` passes for auth-required + queue-worker execution mode.
 4. `python -m pytest --basetemp .pytest_tmp` passes locally.
-5. Current automated test suite: 49 passing tests.
+5. Current automated test suite: 147 passing tests (3 skipped without ffmpeg/torch extras).
 6. Multitenant + admin test paths pass in local pytest run.
 7. `python -m streamlit run app.py --server.headless true --server.port 8501 --browser.gatherUsageStats false` starts the portal locally.
 
@@ -107,8 +118,8 @@ This file tracks concrete implementation progress against the documented V1 arch
 4. Add CI stages for lint/type checks plus smoke tests (`test_api_smoke.py`, `test_api_auth_queue.py`).
 5. Add OpenAPI contract snapshot checks to detect breaking API changes automatically.
 6. Add tenant-aware usage quotas and billing guardrails.
-7. Compute the baseline 15-stat per-team catalog (`FR-STATS-01`) from existing event/tracking outputs, with per-stat availability flags.
-8. Start the production frontend foundation (`FR-UI-01` to `FR-UI-04`): componentized app with auth UX, responsive layout, and guided upload replacing the single-file Studio page.
-9. Add completion email notifications (`FR-NOTIFY-01`) on job success/failure.
-10. Add roster template import and manual highlight assignment (`FR-ROSTER-01`, `FR-ROSTER-04`) as the precursor to jersey-number routing.
-11. Add upload validation for size limits and 30-minute minimum length (`FR-INGEST-05` to `FR-INGEST-07`).
+7. Route highlights to rostered players automatically via jersey-number recognition (`FR-ROSTER-02`) and email player cards (`FR-ROSTER-03`).
+8. Add public share links for matches and individual highlights (`FR-SHARE-01`).
+9. Detect the remaining baseline stats (passes, duels, offsides, assists) so their availability flags flip on (`FR-STATS-01` completion).
+10. Add saved roster library in account profiles (`FR-ROSTER-05`).
+11. Add link-based ingest scaffolding with the per-source capability matrix (`FR-SOURCE-01/02`).

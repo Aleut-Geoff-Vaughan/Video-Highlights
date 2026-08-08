@@ -1,4 +1,4 @@
-from . import admin_global, admin_tenant, agent, auth, events, feedback, health, jobs, matches, training
+from . import admin_global, admin_tenant, agent, auth, events, feedback, health, jobs, matches, roster, training
 
 __all__ = [
     "admin_global",
@@ -10,5 +10,6 @@ __all__ = [
     "health",
     "jobs",
     "matches",
+    "roster",
     "training",
 ]

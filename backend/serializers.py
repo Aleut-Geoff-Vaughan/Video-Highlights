@@ -5,7 +5,9 @@ from .models import (
     EventFeedback,
     JobLogEntry,
     Match,
+    NotificationLog,
     ProcessingJob,
+    RosterEntry,
     Tenant,
     TenantMembership,
     TrainingFeedbackBatch,
@@ -19,6 +21,8 @@ from .schemas import (
     JobRead,
     JobLogRead,
     MatchRead,
+    NotificationRead,
+    RosterEntryRead,
     TenantMembershipRead,
     TenantRead,
     TrainingRunRead,
@@ -98,6 +102,38 @@ def event_to_read(event: Event) -> EventRead:
         explanations=event.explanations_json or [],
         created_at=event.created_at,
         updated_at=event.updated_at,
+    )
+
+
+def roster_to_read(entry: RosterEntry) -> RosterEntryRead:
+    return RosterEntryRead(
+        roster_entry_id=entry.id,
+        tenant_id=entry.tenant_id,
+        match_id=entry.match_id,
+        player_name=entry.player_name,
+        jersey_number=entry.jersey_number,
+        position=entry.position,
+        email=entry.email,
+        team_side=entry.team_side,
+        metadata=entry.metadata_json or {},
+        created_at=entry.created_at,
+        updated_at=entry.updated_at,
+    )
+
+
+def notification_to_read(entry: NotificationLog) -> NotificationRead:
+    return NotificationRead(
+        notification_id=entry.id,
+        tenant_id=entry.tenant_id,
+        match_id=entry.match_id,
+        job_id=entry.job_id,
+        channel=entry.channel,
+        backend=entry.backend,
+        recipient=entry.recipient,
+        subject=entry.subject,
+        status=entry.status,
+        error_message=entry.error_message,
+        created_at=entry.created_at,
     )
 
 
