@@ -19,6 +19,7 @@ from ..config import settings
 from ..models import Event, Match, ProcessingJob
 from ..schemas import MatchStatsRead, StatValue
 from ..utils import utcnow
+from .source_catalog import get_source_type
 
 BASELINE_STATS: List[Tuple[str, str, str]] = [
     ("goals", "Goals", "count"),
@@ -171,12 +172,20 @@ def compute_match_stat_catalog(
     away = match.away_team_name
     artifact = _load_team_stats_artifact(job)
     has_analysis = job is not None or bool(events)
+    source = get_source_type(str((match.metadata_json or {}).get("source_type") or "") or None)
 
     stats: List[StatValue] = []
     for key, label, unit in BASELINE_STATS:
         value = StatValue(key=key, label=label, unit=unit)
         if not has_analysis:
             value.reason = "no_completed_analysis"
+            stats.append(value)
+            continue
+        # A link source that cannot supply this statistic is reported as
+        # unavailable no matter what the pipeline produced.
+        if not source.supports(key):
+            value.reason = "not_available_for_source"
+            value.raw = {"source": source.key, "source_label": source.label}
             stats.append(value)
             continue
 
@@ -224,6 +233,9 @@ def compute_match_stat_catalog(
             "has_completed_job": job is not None,
             "event_count": len(events),
             "team_stats_artifact": bool(artifact),
+            "source_type": source.key,
+            "source_label": source.label,
+            "source_supported_stat_count": len(source.supported_stats),
         },
         stats=stats,
     )

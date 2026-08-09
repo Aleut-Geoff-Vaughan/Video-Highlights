@@ -18,18 +18,28 @@ from sqlmodel import Session, select
 
 from ..auth import UserContext, require_roles
 from ..database import get_session
-from ..models import Event, Match, RosterEntry
+from ..models import Event, Match, RosterEntry, RosterTemplate
 from ..schemas import (
     EventAssignRequest,
     EventRead,
+    PlayerCardRead,
+    PlayerCardSendResult,
     RosterEntryCreate,
     RosterEntryPatch,
     RosterEntryRead,
     RosterImportError,
     RosterImportRequest,
     RosterImportResult,
+    RosterTemplateApply,
+    RosterTemplateCreate,
+    RosterTemplateFromMatch,
+    RosterTemplateRead,
+    RoutingResult,
 )
-from ..serializers import event_to_read, roster_to_read
+from ..serializers import event_to_read, roster_template_to_read, roster_to_read
+from ..services.notifications import send_notification
+from ..services.player_routing import build_player_card, route_match_events
+from ..services.sharing import create_share_link, share_url_path
 from ..tenant import TenantContext, get_tenant_context
 from ..utils import utcnow
 
@@ -281,6 +291,304 @@ def delete_roster_entry(
     session.delete(entry)
     session.commit()
     return {"deleted": True, "roster_entry_id": entry_id, "unassigned_events": len(assigned_events)}
+
+
+@router.post("/matches/{match_id}/roster/route", response_model=RoutingResult)
+def route_highlights_to_players(
+    match_id: str,
+    session: Session = Depends(get_session),
+    _: UserContext = Depends(require_roles(*WRITE_ROLES)),
+    tenant: TenantContext = Depends(get_tenant_context),
+) -> RoutingResult:
+    """Attach highlights carrying a jersey number to their roster entry."""
+    _ensure_match(session, match_id, tenant.tenant_id)
+    result = route_match_events(session, match_id, tenant.tenant_id)
+    session.commit()
+    return result
+
+
+@router.get("/matches/{match_id}/roster/{entry_id}/card", response_model=PlayerCardRead)
+def get_player_card(
+    match_id: str,
+    entry_id: str,
+    session: Session = Depends(get_session),
+    _: UserContext = Depends(require_roles(*READ_ROLES)),
+    tenant: TenantContext = Depends(get_tenant_context),
+) -> PlayerCardRead:
+    match = _ensure_match(session, match_id, tenant.tenant_id)
+    entry = session.get(RosterEntry, entry_id)
+    if not entry or entry.match_id != match_id or entry.tenant_id != tenant.tenant_id:
+        raise HTTPException(status_code=404, detail=f"Roster entry not found: {entry_id}")
+    return build_player_card(session, match, entry)
+
+
+@router.post("/matches/{match_id}/roster/cards/send", response_model=PlayerCardSendResult)
+def send_player_cards(
+    match_id: str,
+    session: Session = Depends(get_session),
+    user: UserContext = Depends(require_roles(*WRITE_ROLES)),
+    tenant: TenantContext = Depends(get_tenant_context),
+) -> PlayerCardSendResult:
+    """Email each rostered player a shareable link to their player card."""
+    match = _ensure_match(session, match_id, tenant.tenant_id)
+    entries = list(
+        session.exec(
+            select(RosterEntry)
+            .where(RosterEntry.match_id == match_id)
+            .where(RosterEntry.tenant_id == tenant.tenant_id)
+        )
+    )
+    result = PlayerCardSendResult(match_id=match_id)
+    for entry in entries:
+        card = build_player_card(session, match, entry)
+        if not entry.email:
+            result.skipped += 1
+            result.details.append({
+                "roster_entry_id": entry.id,
+                "player_name": entry.player_name,
+                "status": "skipped",
+                "reason": "no email address on the roster entry",
+            })
+            continue
+
+        link = create_share_link(
+            session=session,
+            match=match,
+            scope="player_card",
+            roster_entry_id=entry.id,
+            label=f"Player card: {entry.player_name}",
+            created_by_user_id=user.user_id,
+        )
+        session.flush()  # assign the token before it goes into the email body
+        url_path = share_url_path(link.token)
+        match_label = match.name or match_id
+        body = (
+            f"Hi {entry.player_name},\n\n"
+            f"Your player card for '{match_label}' is ready with "
+            f"{card.highlight_count} highlight(s) our system attributed to #{entry.jersey_number}.\n\n"
+            f"View and share it here: {url_path}\n\n"
+            f"The link is public — send it to family, recruiters, or agents."
+        )
+        entry_log = send_notification(
+            session=session,
+            recipient=entry.email,
+            subject=f"Your player card is ready: {match_label}",
+            body=body,
+            tenant_id=tenant.tenant_id,
+            match_id=match_id,
+        )
+        sent = entry_log.status == "sent"
+        result.sent += 1 if sent else 0
+        result.skipped += 0 if sent else 1
+        result.details.append({
+            "roster_entry_id": entry.id,
+            "player_name": entry.player_name,
+            "status": entry_log.status,
+            "reason": entry_log.error_message,
+            "share_url_path": url_path,
+            "highlight_count": card.highlight_count,
+        })
+
+    session.commit()
+    return result
+
+
+# ---- reusable roster templates (FR-ROSTER-05) ----
+
+
+@router.get("/roster-templates", response_model=Dict[str, object])
+def list_roster_templates(
+    session: Session = Depends(get_session),
+    _: UserContext = Depends(require_roles(*READ_ROLES)),
+    tenant: TenantContext = Depends(get_tenant_context),
+) -> Dict[str, object]:
+    rows = list(
+        session.exec(
+            select(RosterTemplate)
+            .where(RosterTemplate.tenant_id == tenant.tenant_id)
+            .order_by(RosterTemplate.name)
+        )
+    )
+    return {"items": [roster_template_to_read(row).model_dump() for row in rows]}
+
+
+@router.post("/roster-templates", response_model=RosterTemplateRead, status_code=201)
+def create_roster_template(
+    payload: RosterTemplateCreate,
+    session: Session = Depends(get_session),
+    user: UserContext = Depends(require_roles(*WRITE_ROLES)),
+    tenant: TenantContext = Depends(get_tenant_context),
+) -> RosterTemplateRead:
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Template name is required")
+    template = _upsert_template(
+        session=session,
+        tenant_id=tenant.tenant_id,
+        name=name,
+        description=payload.description,
+        entries=[entry.model_dump() for entry in payload.entries],
+        user_id=user.user_id,
+    )
+    session.commit()
+    session.refresh(template)
+    return roster_template_to_read(template)
+
+
+@router.post("/matches/{match_id}/roster/save-template", response_model=RosterTemplateRead, status_code=201)
+def save_roster_as_template(
+    match_id: str,
+    payload: RosterTemplateFromMatch,
+    session: Session = Depends(get_session),
+    user: UserContext = Depends(require_roles(*WRITE_ROLES)),
+    tenant: TenantContext = Depends(get_tenant_context),
+) -> RosterTemplateRead:
+    _ensure_match(session, match_id, tenant.tenant_id)
+    stmt = (
+        select(RosterEntry)
+        .where(RosterEntry.match_id == match_id)
+        .where(RosterEntry.tenant_id == tenant.tenant_id)
+    )
+    if payload.team_side:
+        stmt = stmt.where(RosterEntry.team_side == payload.team_side)
+    entries = list(session.exec(stmt))
+    if not entries:
+        raise HTTPException(status_code=400, detail="This match has no roster entries to save")
+
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Template name is required")
+    template = _upsert_template(
+        session=session,
+        tenant_id=tenant.tenant_id,
+        name=name,
+        description=payload.description,
+        entries=[
+            {
+                "player_name": entry.player_name,
+                "jersey_number": entry.jersey_number,
+                "position": entry.position,
+                "email": entry.email,
+                "team_side": entry.team_side,
+            }
+            for entry in entries
+        ],
+        user_id=user.user_id,
+    )
+    session.commit()
+    session.refresh(template)
+    return roster_template_to_read(template)
+
+
+@router.post("/matches/{match_id}/roster/apply-template/{template_id}", response_model=RosterImportResult)
+def apply_roster_template(
+    match_id: str,
+    template_id: str,
+    payload: RosterTemplateApply,
+    session: Session = Depends(get_session),
+    _: UserContext = Depends(require_roles(*WRITE_ROLES)),
+    tenant: TenantContext = Depends(get_tenant_context),
+) -> RosterImportResult:
+    _ensure_match(session, match_id, tenant.tenant_id)
+    template = session.get(RosterTemplate, template_id)
+    if not template or template.tenant_id != tenant.tenant_id:
+        raise HTTPException(status_code=404, detail=f"Roster template not found: {template_id}")
+
+    result = RosterImportResult()
+    for index, raw in enumerate(list(template.entries_json or []), start=1):
+        name = str(raw.get("player_name", "") or "").strip()
+        jersey = str(raw.get("jersey_number", "") or "").strip()
+        side = payload.team_side or str(raw.get("team_side", "home") or "home")
+        if not name or not jersey:
+            result.errors.append(RosterImportError(line=index, issue="player_name and jersey_number are required"))
+            continue
+
+        existing = session.exec(
+            select(RosterEntry)
+            .where(RosterEntry.match_id == match_id)
+            .where(RosterEntry.tenant_id == tenant.tenant_id)
+            .where(RosterEntry.team_side == side)
+            .where(RosterEntry.jersey_number == jersey)
+        ).first()
+        if existing and not payload.replace_existing:
+            result.skipped += 1
+            continue
+        if existing:
+            existing.player_name = name
+            existing.position = raw.get("position") or None
+            existing.email = raw.get("email") or None
+            existing.updated_at = utcnow()
+            session.add(existing)
+            result.updated += 1
+            continue
+
+        session.add(RosterEntry(
+            tenant_id=tenant.tenant_id,
+            match_id=match_id,
+            player_name=name,
+            jersey_number=jersey,
+            position=raw.get("position") or None,
+            email=raw.get("email") or None,
+            team_side=side,
+        ))
+        result.created += 1
+
+    session.commit()
+    rows = list(
+        session.exec(
+            select(RosterEntry)
+            .where(RosterEntry.match_id == match_id)
+            .where(RosterEntry.tenant_id == tenant.tenant_id)
+        )
+    )
+    rows.sort(key=lambda item: (item.team_side, len(item.jersey_number), item.jersey_number))
+    result.entries = [roster_to_read(row) for row in rows]
+    return result
+
+
+@router.delete("/roster-templates/{template_id}", response_model=Dict[str, object])
+def delete_roster_template(
+    template_id: str,
+    session: Session = Depends(get_session),
+    _: UserContext = Depends(require_roles(*WRITE_ROLES)),
+    tenant: TenantContext = Depends(get_tenant_context),
+) -> Dict[str, object]:
+    template = session.get(RosterTemplate, template_id)
+    if not template or template.tenant_id != tenant.tenant_id:
+        raise HTTPException(status_code=404, detail=f"Roster template not found: {template_id}")
+    session.delete(template)
+    session.commit()
+    return {"deleted": True, "template_id": template_id}
+
+
+def _upsert_template(
+    session: Session,
+    tenant_id: Optional[str],
+    name: str,
+    description: Optional[str],
+    entries: list,
+    user_id: Optional[str],
+) -> RosterTemplate:
+    """Saving under an existing name replaces it — templates are living rosters."""
+    template = session.exec(
+        select(RosterTemplate)
+        .where(RosterTemplate.tenant_id == tenant_id)
+        .where(RosterTemplate.name == name)
+    ).first()
+    if template:
+        template.description = description
+        template.entries_json = entries
+        template.updated_at = utcnow()
+    else:
+        template = RosterTemplate(
+            tenant_id=tenant_id,
+            name=name,
+            description=description,
+            entries_json=entries,
+            created_by_user_id=user_id,
+        )
+    session.add(template)
+    return template
 
 
 @router.post("/matches/{match_id}/events/{event_id}/assign", response_model=EventRead)

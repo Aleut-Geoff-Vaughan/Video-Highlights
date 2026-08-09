@@ -369,6 +369,107 @@ class MatchStatsRead(BaseModel):
     stats: List[StatValue] = Field(default_factory=list)
 
 
+ShareScope = Literal["match", "highlight", "player_card"]
+
+
+class ShareLinkCreate(BaseModel):
+    scope: ShareScope = "match"
+    event_id: Optional[str] = None
+    roster_entry_id: Optional[str] = None
+    label: Optional[str] = None
+    expires_in_days: Optional[int] = Field(default=None, ge=1, le=3650)
+
+
+class ShareLinkRead(BaseModel):
+    share_id: str
+    token: str
+    url_path: str
+    tenant_id: Optional[str] = None
+    match_id: str
+    scope: str
+    event_id: Optional[str] = None
+    roster_entry_id: Optional[str] = None
+    label: Optional[str] = None
+    revoked: bool = False
+    expires_at: Optional[datetime] = None
+    view_count: int = 0
+    created_at: datetime
+
+
+class RosterTemplateEntry(BaseModel):
+    player_name: str
+    jersey_number: str
+    position: Optional[str] = None
+    email: Optional[str] = None
+    team_side: RosterTeamSide = "home"
+
+
+class RosterTemplateCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+    entries: List[RosterTemplateEntry] = Field(default_factory=list)
+
+
+class RosterTemplateFromMatch(BaseModel):
+    name: str
+    description: Optional[str] = None
+    team_side: Optional[RosterTeamSide] = None
+
+
+class RosterTemplateApply(BaseModel):
+    team_side: Optional[RosterTeamSide] = None
+    replace_existing: bool = False
+
+
+class RosterTemplateRead(BaseModel):
+    template_id: str
+    tenant_id: Optional[str] = None
+    name: str
+    description: Optional[str] = None
+    entries: List[RosterTemplateEntry] = Field(default_factory=list)
+    entry_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class PlayerCardStat(BaseModel):
+    key: str
+    label: str
+    count: int = 0
+
+
+class PlayerCardRead(BaseModel):
+    match_id: str
+    roster_entry_id: str
+    player_name: str
+    jersey_number: str
+    position: Optional[str] = None
+    team_side: str = "home"
+    team_name: Optional[str] = None
+    match_name: Optional[str] = None
+    match_date: Optional[str] = None
+    highlight_count: int = 0
+    stats: List[PlayerCardStat] = Field(default_factory=list)
+    highlights: List[Dict[str, Any]] = Field(default_factory=list)
+    share_url_path: Optional[str] = None
+
+
+class RoutingResult(BaseModel):
+    match_id: str
+    routed: int = 0
+    already_routed: int = 0
+    unmatched_jersey_numbers: List[str] = Field(default_factory=list)
+    unassigned_remaining: int = 0
+    roster_size: int = 0
+
+
+class PlayerCardSendResult(BaseModel):
+    match_id: str
+    sent: int = 0
+    skipped: int = 0
+    details: List[Dict[str, Any]] = Field(default_factory=list)
+
+
 class NotificationRead(BaseModel):
     notification_id: str
     tenant_id: Optional[str] = None

@@ -8,6 +8,7 @@ from .models import (
     NotificationLog,
     ProcessingJob,
     RosterEntry,
+    RosterTemplate,
     Tenant,
     TenantMembership,
     TrainingFeedbackBatch,
@@ -23,6 +24,8 @@ from .schemas import (
     MatchRead,
     NotificationRead,
     RosterEntryRead,
+    RosterTemplateEntry,
+    RosterTemplateRead,
     TenantMembershipRead,
     TenantRead,
     TrainingRunRead,
@@ -118,6 +121,25 @@ def roster_to_read(entry: RosterEntry) -> RosterEntryRead:
         metadata=entry.metadata_json or {},
         created_at=entry.created_at,
         updated_at=entry.updated_at,
+    )
+
+
+def roster_template_to_read(template: RosterTemplate) -> RosterTemplateRead:
+    entries = []
+    for raw in list(template.entries_json or []):
+        try:
+            entries.append(RosterTemplateEntry(**raw))
+        except Exception:
+            continue
+    return RosterTemplateRead(
+        template_id=template.id,
+        tenant_id=template.tenant_id,
+        name=template.name,
+        description=template.description,
+        entries=entries,
+        entry_count=len(entries),
+        created_at=template.created_at,
+        updated_at=template.updated_at,
     )
 
 

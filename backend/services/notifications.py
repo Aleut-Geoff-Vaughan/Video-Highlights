@@ -74,6 +74,54 @@ def _send_smtp(recipient: str, subject: str, body: str) -> None:
         client.send_message(message)
 
 
+def send_notification(
+    session: Session,
+    recipient: Optional[str],
+    subject: str,
+    body: str,
+    tenant_id: Optional[str] = None,
+    match_id: Optional[str] = None,
+    job_id: Optional[str] = None,
+) -> NotificationLog:
+    """Deliver (or record) a one-off email and log the attempt.
+
+    Always returns a log row — callers use its ``status`` to report what
+    happened. Never raises: a delivery failure must not fail the caller.
+    """
+    entry = NotificationLog(
+        tenant_id=tenant_id,
+        match_id=match_id,
+        job_id=job_id,
+        channel="email",
+        backend=settings.notify_backend,
+        recipient=recipient,
+        subject=subject,
+        body=body,
+    )
+    if settings.notify_backend == "disabled":
+        entry.status = "skipped"
+        entry.error_message = "Notifications are disabled"
+    elif not recipient:
+        entry.status = "skipped"
+        entry.error_message = "No recipient email address"
+    elif settings.notify_backend == "console":
+        entry.status = "sent"
+        logger.info("[notify] to=%s subject=%s", recipient, subject)
+    elif settings.notify_backend == "smtp":
+        try:
+            _send_smtp(recipient, subject, body)
+            entry.status = "sent"
+        except Exception as exc:
+            entry.status = "failed"
+            entry.error_message = str(exc)
+            logger.warning("[notify] smtp delivery failed to=%s: %s", recipient, exc)
+    else:
+        entry.status = "failed"
+        entry.error_message = f"Unknown notify backend: {settings.notify_backend}"
+    session.add(entry)
+    return entry
+
+
 def notify_job_terminal_state(session: Session, job: ProcessingJob) -> Optional[NotificationLog]:
     """Record (and, where configured, deliver) a terminal-state notification."""
     try:

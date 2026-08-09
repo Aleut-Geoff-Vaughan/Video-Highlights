@@ -164,10 +164,12 @@ and provides:
 1. **Matches** — per-match dashboard: the baseline 15-stat team catalog with
    per-stat availability flags and evidence drill-down, roster management
    (single entries or CSV template import via `GET /v1/matches/roster-template.csv`),
-   and manual highlight-to-player assignment.
+   manual highlight-to-player assignment, jersey routing, player cards, saved
+   team rosters, and share links for the match or any single highlight.
 2. **Create** — guided upload wizard: drag-and-drop with progress, pre-flight
    validation against `GET /v1/matches/upload-policy` (size caps, formats,
-   minimum length), resolution warnings, and an optional notify email.
+   minimum length), resolution warnings, a paste-a-link option that discloses
+   how many of the 15 stats that provider can support, and an optional notify email.
 3. **Jobs** — queue with stage progress, elapsed-vs-SLA turnaround messaging,
    live logs, and completion-notification delivery state.
 4. **Runs** — the film review workspace (video views, bookmarks, team panel,
@@ -190,6 +192,43 @@ A tenant gets the extended upload cap when its metadata contains
 job config's `notify_email` (set by the Create wizard) or the match metadata's
 `notify_email`, and every attempt is recorded and visible via
 `GET /v1/jobs/{job_id}/notifications`.
+
+### Sharing, player cards, and ingest sources
+
+Share links are unguessable tokens that work without an account:
+
+```bash
+curl -X POST localhost:8000/v1/matches/<match_id>/shares -d '{"scope":"match"}' -H 'Content-Type: application/json'
+# -> {"token": "...", "url_path": "/#share/<token>", ...}
+curl localhost:8000/v1/public/shares/<token>     # no auth, no tenant header
+```
+
+`scope` is `match`, `highlight` (with `event_id`), or `player_card` (with
+`roster_entry_id`). Public payloads are assembled field by field, so
+filesystem paths, tenant ids, and reviewer metadata never appear in them.
+Revoke with `DELETE /v1/shares/{share_id}`.
+
+Roster and player workflows:
+
+```bash
+POST /v1/matches/{id}/roster/route          # attach highlights to players by jersey number
+GET  /v1/matches/{id}/roster/{entry}/card   # a player's highlights and tallies
+POST /v1/matches/{id}/roster/cards/send     # email every rostered player their card link
+POST /v1/matches/{id}/roster/save-template  # save this roster as a reusable team
+POST /v1/matches/{id}/roster/apply-template/{template_id}
+```
+
+Note on jersey routing: the analysis pipeline does not yet recognize jersey
+numbers from video, so `Event.jersey_number` is only populated by manual
+assignment or reviewer corrections today. Routing runs automatically after a
+job completes and reports exactly what it could and could not place; the
+recognition step is the remaining work for full `FR-ROSTER-02`.
+
+`GET /v1/sources` returns the ingest capability matrix — which of the 15
+statistics each source can produce. Pasted links are classified on match
+creation (stored as `metadata.source_type`), the Create wizard discloses the
+coverage before submission, and the stat catalog marks anything the source
+cannot support as unavailable rather than reporting zero.
 
 For large match files, including 10GB+ recordings, use the portal's **Local File Path (10GB+)** video source. Use **Browse** or paste a path to register a file that already exists on the API/worker machine and process it in place. The portal preflights the path through the API worker and reports file size, basic media metadata when `ffprobe` is available, and clear messages for missing, zero-byte, cloud-placeholder, or still-copying files. Browser upload is intended only for smaller files.
 

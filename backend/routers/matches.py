@@ -24,6 +24,7 @@ from ..schemas import (
 from ..serializers import match_to_read
 from ..services.ffmpeg_tools import ffprobe_exe
 from ..services.media_timeline import build_media_timeline
+from ..services.source_catalog import RAW_UPLOAD, detect_source_from_url
 from ..services.stat_catalog import compute_match_stat_catalog
 from ..services.storage import get_storage_backend
 from ..tenant import TenantContext, get_tenant_context
@@ -193,6 +194,15 @@ def create_match(
             raise HTTPException(status_code=403, detail="Cannot create a match in another tenant")
         target_tenant_id = payload.tenant_id
 
+    # Classify the ingest source so stat coverage can be disclosed up front
+    # and the stat catalog can mark link-limited statistics unavailable.
+    metadata = dict(payload.metadata or {})
+    if not metadata.get("source_type"):
+        detected = detect_source_from_url(payload.source_video_path)
+        metadata["source_type"] = detected.key if detected else RAW_UPLOAD
+        if detected:
+            metadata.setdefault("source_url", payload.source_video_path)
+
     match = Match(
         tenant_id=target_tenant_id,
         name=payload.name,
@@ -200,7 +210,7 @@ def create_match(
         away_team_name=payload.away_team_name,
         match_date=payload.match_date,
         source_video_path=payload.source_video_path,
-        metadata_json=payload.metadata,
+        metadata_json=metadata,
     )
     session.add(match)
     session.commit()

@@ -100,13 +100,23 @@ This file tracks concrete implementation progress against the documented V1 arch
 7. Rebuilt the web UI as a componentized ES-module app under `frontend/` (still no build step): sign-in (token or dev) with no hardcoded tenant, responsive layout with mobile nav, match dashboard (stat catalog, roster import, highlight assignment), guided 3-step upload wizard with policy pre-flight and progress, jobs view with SLA turnaround messaging and notification state, and the ported film-review workspace (`FR-UI-01..04`, `FR-UI-05/06` first pass, `FR-UI-12`).
 8. Added test coverage: `tests/test_match_stats.py`, `tests/test_roster_and_assignment.py`, `tests/test_upload_validation.py`, `tests/test_notifications.py`; browser smoke test of the new UI ran green under Playwright/Chromium.
 
+## Sharing, routing, templates, and source coverage batch
+
+1. Added public share links (`backend/services/sharing.py`, `backend/routers/sharing.py`): tokenized `match`, `highlight`, and `player_card` scopes, reuse of an existing live link, revocation, view counting, and an unauthenticated `GET /v1/public/shares/{token}` whose payload is assembled field by field so paths and tenant internals cannot leak (`FR-SHARE-01/03`).
+2. Added player routing (`backend/services/player_routing.py`): maps `Event.jersey_number` to roster entries per team side, tolerates leading zeros, refuses ambiguous numbers when the event has no team, is idempotent, and runs automatically after job completion (`FR-ROSTER-02` routing half).
+3. Added player cards: `GET /v1/matches/{id}/roster/{entry}/card` (per-player highlights and tallies) and `POST /v1/matches/{id}/roster/cards/send`, which creates a player-card share link per rostered player and emails it (`FR-ROSTER-03`).
+4. Added reusable roster templates (`FR-ROSTER-05`): save a match roster as a named team, list, apply to another match (skip or replace existing), and delete; saving under an existing name replaces it.
+5. Added the ingest source capability matrix (`backend/services/source_catalog.py`): YouTube, Vimeo, VEO, Hudl, Pixellot, XbotGo, NBC Sports Engine plus raw upload and local path, each with the statistics it can support. `GET /v1/sources` serves the matrix and classifies a URL; match creation stores `metadata.source_type`; the stat catalog marks source-limited statistics `not_available_for_source` (`FR-SOURCE-01/02/03`, `FR-STATS-04`).
+6. Extended the web UI: public share view (no sign-in, app nav hidden), share buttons for the match and each highlight, share-link management with revoke, player card panel with its own share link, roster routing and card-send actions, saved-team picker, and link-source coverage disclosure in the Create wizard.
+7. Added test coverage: `tests/test_sharing.py`, `tests/test_player_routing.py`, `tests/test_roster_templates.py`, `tests/test_source_catalog.py`.
+
 ## Validated
 
 1. `python -m compileall app.py VideoHighlights.py backend` succeeds.
 2. `python test_api_smoke.py` passes end-to-end for core API flow.
 3. `python test_api_auth_queue.py` passes for auth-required + queue-worker execution mode.
 4. `python -m pytest --basetemp .pytest_tmp` passes locally.
-5. Current automated test suite: 147 passing tests (3 skipped without ffmpeg/torch extras).
+5. Current automated test suite: 172 passing tests (3 skipped without ffmpeg/torch extras).
 6. Multitenant + admin test paths pass in local pytest run.
 7. `python -m streamlit run app.py --server.headless true --server.port 8501 --browser.gatherUsageStats false` starts the portal locally.
 
@@ -118,8 +128,8 @@ This file tracks concrete implementation progress against the documented V1 arch
 4. Add CI stages for lint/type checks plus smoke tests (`test_api_smoke.py`, `test_api_auth_queue.py`).
 5. Add OpenAPI contract snapshot checks to detect breaking API changes automatically.
 6. Add tenant-aware usage quotas and billing guardrails.
-7. Route highlights to rostered players automatically via jersey-number recognition (`FR-ROSTER-02`) and email player cards (`FR-ROSTER-03`).
-8. Add public share links for matches and individual highlights (`FR-SHARE-01`).
-9. Detect the remaining baseline stats (passes, duels, offsides, assists) so their availability flags flip on (`FR-STATS-01` completion).
-10. Add saved roster library in account profiles (`FR-ROSTER-05`).
-11. Add link-based ingest scaffolding with the per-source capability matrix (`FR-SOURCE-01/02`).
+7. Recognize jersey numbers from video so routing runs without manual assignment (completes `FR-ROSTER-02`); requires a jersey-number model and per-player crop extraction.
+8. Fetch and analyze link-based sources end to end (`FR-SOURCE-01` retrieval half) — the capability matrix and disclosure exist, the download/ingest path does not.
+9. Detect the remaining baseline stats (passes, pass accuracy, key passes, duels, offsides, assists) so their availability flags flip on (`FR-STATS-01` completion).
+10. Add social posting targets for share links (`FR-SHARE-02`, Facebook/X/TikTok/Instagram).
+11. Add plans, entitlements, and billing surfaces (`FR-PLAN-01` to `FR-PLAN-05`) — the upload-entitlement hook already reads tenant metadata.

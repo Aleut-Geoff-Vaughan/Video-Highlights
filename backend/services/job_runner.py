@@ -17,6 +17,7 @@ from ..models import Event, Match, ProcessingJob, TrainingFeedbackBatch, Trainin
 from .gpu_status import get_gpu_status
 from .job_logging import append_job_log
 from .notifications import notify_job_terminal_state
+from .player_routing import route_match_events
 from .yolo_training import train_ultralytics_yolo
 from ..utils import ensure_dir
 
@@ -775,6 +776,34 @@ class JobRunner:
                         config=config,
                         manifest=analysis_manifest,
                     )
+                    # Attach any highlight carrying a recognized jersey number
+                    # to its roster entry. No-op until the CV layer populates
+                    # jersey numbers or a roster has been uploaded.
+                    try:
+                        session.flush()
+                        routing = route_match_events(session, job.match_id, job.tenant_id)
+                        if routing.roster_size:
+                            append_job_log(
+                                session=session,
+                                job_id=job.id,
+                                tenant_id=job.tenant_id,
+                                level="info",
+                                stage="completed",
+                                message="Routed highlights to rostered players",
+                                detail_level="detailed",
+                                data=routing.model_dump(),
+                            )
+                    except Exception as routing_error:  # routing must never fail the job
+                        append_job_log(
+                            session=session,
+                            job_id=job.id,
+                            tenant_id=job.tenant_id,
+                            level="warning",
+                            stage="completed",
+                            message="Player routing skipped after an error",
+                            detail_level="detailed",
+                            data={"error": str(routing_error)},
+                        )
                     if job.cancel_requested:
                         job.status = "canceled"
                         job.stage = "canceled"

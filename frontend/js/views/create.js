@@ -5,10 +5,10 @@
 import { get, post, uploadFile } from '../api.js';
 import { $, esc, fmtBytes, fmtSeconds, setMain } from '../ui.js';
 
-const state = { step: 1, policy: null, file: null, fileMeta: {}, localPath: '' };
+const state = { step: 1, policy: null, sources: [], file: null, fileMeta: {}, localPath: '', link: '', linkSource: null };
 
 export async function renderCreate() {
-  state.step = 1; state.file = null; state.fileMeta = {}; state.localPath = '';
+  state.step = 1; state.file = null; state.fileMeta = {}; state.localPath = ''; state.link = ''; state.linkSource = null;
   setMain(`
     <h1>Create</h1>
     <div class="sub">Upload a match and let the analysis run — nothing to configure unless you want to</div>
@@ -18,6 +18,11 @@ export async function renderCreate() {
     state.policy = await get('/matches/upload-policy');
   } catch {
     state.policy = null;
+  }
+  try {
+    state.sources = (await get('/sources')).sources;
+  } catch {
+    state.sources = [];
   }
   renderStep();
 }
@@ -81,10 +86,12 @@ function stepVideo() {
   const policy = state.policy;
   const maxLabel = policy ? `${policy.max_upload_gb} GB` : '3 GB';
   const extensions = (policy?.allowed_extensions || ['.mp4', '.mov', '.mkv', '.avi', '.m4v']).join(', ');
+  const linkProviders = (state.sources || []).filter((source) => source.kind === 'link' && source.key !== 'other_link');
   $('#wizard').innerHTML = `
     <div class="panel"><h3>Video source</h3>
       <div class="checks">
         <label><input type="radio" name="c_src" id="c_src_up" checked> Upload a file</label>
+        <label><input type="radio" name="c_src" id="c_src_link"> Paste a video link</label>
         <label><input type="radio" name="c_src" id="c_src_local"> Local file on the server (no upload)</label>
       </div>
       <div id="uprow">
@@ -96,6 +103,13 @@ function stepVideo() {
         <div class="filemeta" id="filemeta"></div>
         <div id="filenotes"></div>
       </div>
+      <div id="linkrow" style="display:none">
+        <label>Public video link</label>
+        <input type="text" id="c_link" placeholder="https://www.youtube.com/watch?v=…" value="${esc(state.link)}">
+        <div id="linknotes"></div>
+        <div class="note">Supported: ${linkProviders.map((source) => esc(source.label)).join(', ')}.
+          Raw file uploads always produce the most complete statistics.</div>
+      </div>
       <div id="pathrow" style="display:none">
         <label>Absolute path on the server / container</label>
         <input type="text" id="c_path" placeholder="/data/videos/match.mp4" value="${esc(state.localPath)}">
@@ -105,15 +119,47 @@ function stepVideo() {
     <button class="btn2" id="back2">← Back</button>
     <button class="btn" id="next2" disabled>Continue</button>`;
 
+  const currentMode = () => $('#c_src_local').checked ? 'local' : ($('#c_src_link').checked ? 'link' : 'upload');
   const setSource = () => {
-    const local = $('#c_src_local').checked;
-    $('#uprow').style.display = local ? 'none' : '';
-    $('#pathrow').style.display = local ? '' : 'none';
+    const mode = currentMode();
+    $('#uprow').style.display = mode === 'upload' ? '' : 'none';
+    $('#linkrow').style.display = mode === 'link' ? '' : 'none';
+    $('#pathrow').style.display = mode === 'local' ? '' : 'none';
     updateNext();
   };
   $('#c_src_up').onchange = setSource;
+  $('#c_src_link').onchange = setSource;
   $('#c_src_local').onchange = setSource;
   $('#c_path').oninput = () => { state.localPath = $('#c_path').value.trim(); updateNext(); };
+
+  let linkTimer = null;
+  $('#c_link').oninput = () => {
+    state.link = $('#c_link').value.trim();
+    state.linkSource = null;
+    updateNext();
+    clearTimeout(linkTimer);
+    linkTimer = setTimeout(classifyLink, 400);
+  };
+  if (state.link) classifyLink();
+
+  async function classifyLink() {
+    const notes = $('#linknotes');
+    if (!notes || !state.link) { if (notes) notes.innerHTML = ''; return; }
+    try {
+      const { detected } = await get(`/sources?url=${encodeURIComponent(state.link)}`);
+      state.linkSource = detected;
+      if (!detected) { notes.innerHTML = '<div class="warnnote">That does not look like a video URL.</div>'; return; }
+      const missing = detected.unsupported_stats || [];
+      notes.innerHTML = `
+        <div class="note"><b>${esc(detected.label)}</b> — ${detected.supported_stat_count} of
+          ${detected.total_stat_count} stats available. ${esc(detected.notes)}</div>
+        ${missing.length ? `<div class="warnnote">Not available from this source:
+          ${missing.map((key) => esc(key.replace(/_/g, ' '))).join(', ')}.
+          Upload the raw file instead to get all ${detected.total_stat_count}.</div>` : ''}`;
+    } catch {
+      notes.innerHTML = '';
+    }
+  }
 
   const drop = $('#drop');
   drop.onclick = () => $('#c_file').click();
@@ -130,8 +176,10 @@ function stepVideo() {
   $('#next2').onclick = () => { state.step = 3; renderStep(); };
 
   function updateNext() {
-    const local = $('#c_src_local').checked;
-    $('#next2').disabled = local ? !state.localPath : !state.file || state.fileMeta.blocked;
+    const mode = currentMode();
+    if (mode === 'local') $('#next2').disabled = !state.localPath;
+    else if (mode === 'link') $('#next2').disabled = !state.link;
+    else $('#next2').disabled = !state.file || state.fileMeta.blocked;
   }
 
   async function acceptFile(file) {
@@ -251,16 +299,20 @@ async function submit() {
   const details = state.details;
   try {
     progress.innerHTML = 'Creating match…';
+    const metadata = details.email ? { notify_email: details.email } : {};
     const match = await post('/matches', {
       name: details.name,
       home_team_name: details.home,
       away_team_name: details.away,
       match_date: details.date || null,
-      source_video_path: state.localPath || state.file?.name || '',
-      metadata: details.email ? { notify_email: details.email } : {},
+      // A pasted link is stored as the source path and classified server-side.
+      source_video_path: state.link || state.localPath || state.file?.name || '',
+      metadata,
     });
 
-    if (state.localPath) {
+    if (state.link) {
+      progress.innerHTML = 'Queuing link-based analysis…';
+    } else if (state.localPath) {
       progress.innerHTML = 'Registering local video…';
       await post(`/matches/${match.match_id}/assets/register-local`, { path: state.localPath });
     } else {

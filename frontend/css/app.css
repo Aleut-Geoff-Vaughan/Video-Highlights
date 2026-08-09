@@ -33,6 +33,12 @@ nav .navfoot button{margin-top:8px;width:auto;padding:5px 12px;border:1px solid 
 
 main{margin-left:230px;flex:1;padding:22px 26px;max-width:1500px;width:100%}
 
+/* Public share view: logo only, no app navigation */
+body.public nav{width:100%;position:sticky;top:0;bottom:auto;height:auto;border-right:0;border-bottom:1px solid var(--line);padding:14px 22px}
+body.public .navlinks,body.public .navtoggle{display:none}
+body.public{flex-direction:column}
+body.public main{margin-left:0;max-width:1100px;width:100%;align-self:center}
+
 /* Mobile: sidebar collapses to a top bar with a menu toggle */
 @media (max-width:840px){
   body{flex-direction:column}

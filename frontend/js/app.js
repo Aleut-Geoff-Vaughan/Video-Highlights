@@ -8,6 +8,7 @@ import { renderMatches, renderMatchDetail } from './views/matches.js';
 import { renderCreate } from './views/create.js';
 import { renderJobs } from './views/jobs.js';
 import { renderRuns, renderRunDetail } from './views/runs.js';
+import { renderShare } from './views/share.js';
 
 let currentUser = null;
 
@@ -35,6 +36,17 @@ function renderUserChip() {
 }
 
 async function render() {
+  const [routePage, routeArg] = (location.hash.slice(1) || 'matches').split('/');
+  // Share links are public: never gate them behind sign-in, and hide the
+  // app navigation — a recruiter opening a link is not a Studio user.
+  if (routePage === 'share' && routeArg) {
+    $('#navlinks').classList.remove('open');
+    document.body.classList.add('public');
+    markNav('');
+    return renderShare(decodeURIComponent(routeArg));
+  }
+  document.body.classList.remove('public');
+
   if (!currentUser) {
     const signIn = () => renderLogin(async () => { currentUser = await whoami(); renderUserChip(); render(); });
     if (getSession().signedOut) { renderUserChip(); signIn(); return; }
